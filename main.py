@@ -6,10 +6,8 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from tqdm import tqdm
 
-from model_registry import build_model, available_models
+from model_registry import build_model, available_models, load_model_from_checkpoint
 from dataloader import build_dataloader
-
-
 
 def _build_args() -> argparse.Namespace:
 
@@ -73,22 +71,28 @@ def _build_args() -> argparse.Namespace:
         '--loss_function',
         type=str,
         default=None,
-        choices=['L2', 'MSE', 'MAE'],
+        choices=['MSE', 'MSE+Grad'],
         help='Loss function (overrides model default)'
     )
     
     # Model hyperparameters (optional overrides)
     parser.add_argument(
-        '--modesSpace',
-        type=int,
+        '--n_modes',
+        type=str,
         default=None,
-        help='Number of Fourier modes in space (FNO only)'
+        help='Fourier modes as comma-separated tuple, e.g. "8,8,8" (FNO only)'
     )
     parser.add_argument(
-        '--modesTime',
+        '--hidden_channels',
         type=int,
         default=None,
-        help='Number of Fourier modes in time (FNO only)'
+        help='Hidden channels width (FNO only)'
+    )
+    parser.add_argument(
+        '--n_layers',
+        type=int,
+        default=None,
+        help='Number of FNO layers (FNO only)'
     )
     
     # Callbacks
@@ -152,10 +156,12 @@ def _train(args):
             overrides['learning_rate'] = args.learning_rate
         if args.loss_function is not None:
             overrides['loss_function'] = args.loss_function
-        if args.modesSpace is not None:
-            overrides['modesSpace'] = args.modesSpace
-        if args.modesTime is not None:
-            overrides['modesTime'] = args.modesTime
+        if args.n_modes is not None:
+            overrides['n_modes'] = tuple(map(int, args.n_modes.split(',')))
+        if args.hidden_channels is not None:
+            overrides['hidden_channels'] = args.hidden_channels
+        if args.n_layers is not None:
+            overrides['n_layers'] = args.n_layers
         
         model, model_config = build_model(args.model, **overrides)
         pbar.update(1)
@@ -164,8 +170,8 @@ def _train(args):
         callbacks = []
         checkpoint_callback = ModelCheckpoint(
             dirpath=args.checkpoint_dir,
-            filename=f'{args.model}-{{epoch:02d}}-{{val_L2_loss:.4f}}',
-            monitor='val_L2_loss',
+            filename=f'{args.model}-{{epoch:02d}}-{{val_MSE_loss:.4f}}',
+            monitor='val_MSE_loss',
             mode='min',
             save_top_k=3,
             save_last=True,
@@ -174,7 +180,7 @@ def _train(args):
         
         if args.early_stopping:
             early_stop_callback = EarlyStopping(
-                monitor='val_L2_loss',
+                monitor='val_MSE_loss',
                 patience=args.patience,
                 mode='min',
                 verbose=True,
@@ -222,8 +228,7 @@ def _inference(args):
         pbar.update(1)
         
         pbar.set_description('Loading model')
-        from models import FNOModel
-        model = FNOModel.load_from_checkpoint(checkpoint_path)
+        model = load_model_from_checkpoint(str(checkpoint_path), model_name=args.model)
         pbar.update(1)
         
         pbar.set_description('Setting up trainer')

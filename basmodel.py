@@ -1,59 +1,41 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 from abc import abstractmethod
+from neuralop import FNO
 
 
-class LpLoss(object):
-    """Lp loss function for relative error computation."""
+class GradientLoss(nn.Module):
+
+    def __init__(self, loss_type="L2"):
+        super(GradientLoss, self).__init__()
+        self.loss_type = loss_type
     
-    def __init__(self, d=2, p=2, size_average=True, reduction=True):
-        super(LpLoss, self).__init__()
-        
-        # Dimension and Lp-norm type are positive
-        assert d > 0 and p > 0
-        
-        self.d = d
-        self.p = p
-        self.reduction = reduction
-        self.size_average = size_average
-    
-    def abs(self, x, y):
-        num_examples = x.size()[0]
-        
-        # Assume uniform mesh
-        h = 1.0 / (x.size()[1] - 1.0)
-        
-        all_norms = (h**(self.d/self.p)) * torch.norm(
-            x.view(num_examples, -1) - y.view(num_examples, -1), self.p, 1
-        )
-        
-        if self.reduction:
-            if self.size_average:
-                return torch.mean(all_norms)
-            else:
-                return torch.sum(all_norms)
-        
-        return all_norms
-    
-    def rel(self, x, y):
-        num_examples = x.size()[0]
-        
-        diff_norms = torch.norm(
-            x.reshape(num_examples, -1) - y.reshape(num_examples, -1), self.p, 1
-        )
-        y_norms = torch.norm(y.reshape(num_examples, -1), self.p, 1)
-        
-        if self.reduction:
-            if self.size_average:
-                return torch.mean(diff_norms / y_norms)
-            else:
-                return torch.sum(diff_norms / y_norms)
-        
-        return diff_norms / y_norms
-    
-    def __call__(self, x, y):
-        return self.rel(x, y)
+    def forward(self, y_pred, y_true):
+        dx_pred = y_pred[:, :, 1:, :] - y_pred[:, :, :-1, :]
+        dy_pred = y_pred[:, :, :, 1:] - y_pred[:, :, :, :-1]
+
+        dx_true = y_true[:, :, 1:, :] - y_true[:, :, :-1, :]
+        dy_true = y_true[:, :, :, 1:] - y_true[:, :, :, :-1]
+
+        loss = F.mse_loss(dx_pred, dx_true) + F.mse_loss(dy_pred, dy_true)
+
+        return loss
+
+class MSEWithGradientLoss(nn.Module):
+
+    def __init__(self, alpha: float=0.5):
+        super(MSEWithGradientLoss, self).__init__()
+        self.alpha = alpha
+        self.gradient_loss = GradientLoss()
+
+    def forward(self, y_pred, y_true):
+        mse_loss = F.mse_loss(y_pred, y_true)
+        grad_loss = self.gradient_loss(y_pred, y_true)
+        loss = mse_loss + self.alpha * grad_loss
+
+        return loss
 
 
 class BaseModel(L.LightningModule):
@@ -65,12 +47,10 @@ class BaseModel(L.LightningModule):
         self.loss_name = loss_function
         
         # Loss function setup
-        if loss_function == 'L2':
-            self.loss_function = LpLoss()
-        elif loss_function == 'MSE':
+        if loss_function == "MSE":
             self.loss_function = F.mse_loss
-        elif loss_function == 'MAE':
-            self.loss_function = F.l1_loss
+        elif loss_function == "MSE+Grad":
+            self.loss_function = MSEWithGradientLoss()
         else:
             raise ValueError(f"Unsupported loss function: {loss_function}")
     
@@ -82,13 +62,11 @@ class BaseModel(L.LightningModule):
         x, y = batch 
         y_hat = self(x)
         train_loss = self.loss_function(y_hat, y)
-        train_mse = F.mse_loss(y_hat, y)
         
         # Log metrics
         log_dict = {
-            'mse_loss': train_mse, 
-            f'train_{self.loss_name}_loss': train_loss,
-            'learning_rate': self.learning_rate
+            f"train_{self.loss_name}_loss": train_loss,
+            "learning_rate": self.learning_rate
         }
         self.log_dict(
             log_dict, 
@@ -101,29 +79,16 @@ class BaseModel(L.LightningModule):
         return train_loss
 
     def validation_step(self, batch, batch_idx):
-        """
-        Validation step with automatic logging.
-        Logs to both TensorBoard and progress bar.
-        """
         x, y = batch
         y_hat = self(x)
         val_loss = self.loss_function(y_hat, y)
-        val_mse = F.mse_loss(y_hat, y)
         
         # Log metrics
         self.log(
-            f'val_{self.loss_name}_loss', 
+            f"val_{self.loss_name}_loss", 
             val_loss, 
             prog_bar=True, 
             on_step=False, 
-            on_epoch=True,
-            logger=True
-        )
-        self.log(
-            'val_mse_loss',
-            val_mse,
-            prog_bar=False,
-            on_step=False,
             on_epoch=True,
             logger=True
         )
@@ -134,22 +99,13 @@ class BaseModel(L.LightningModule):
         x, y = batch
         y_hat = self(x)
         test_loss = self.loss_function(y_hat, y)
-        test_mse = F.mse_loss(y_hat, y)
         
         # Log metrics
         self.log(
-            f'test_{self.loss_name}_loss', 
+            f"test_{self.loss_name}_loss", 
             test_loss, 
             prog_bar=True, 
             on_step=False, 
-            on_epoch=True,
-            logger=True
-        )
-        self.log(
-            'test_mse_loss',
-            test_mse,
-            prog_bar=False,
-            on_step=False,
             on_epoch=True,
             logger=True
         )
@@ -166,7 +122,98 @@ class BaseModel(L.LightningModule):
     
     def on_train_epoch_end(self):
         # Log current epoch number
-        self.log('epoch', float(self.current_epoch), logger=True)
+        self.log("epoch", float(self.current_epoch), logger=True)
     
     def on_validation_epoch_end(self):
         pass
+
+
+
+
+
+class FNOModel(BaseModel):
+    
+    def __init__(
+        self,
+        n_modes: tuple = (16, 16, 16),
+        hidden_channels: int = 64,
+        in_channels: int = 4,
+        out_channels: int = 1,
+        n_layers: int = 4,
+        non_linearity = F.gelu,
+        stabilizer: str | None = None,
+        norm: str | None = None,
+        preactivation: bool = False,
+        fno_skip: str = 'linear',
+        separable: bool = False,
+        factorization: str | None = None,
+        rank: float = 1.0,
+        fixed_rank_modes: bool = False,
+        implementation: str = 'factorized',
+        decomposition_kwargs: dict | None = None,
+        domain_padding: float | None = None,
+        learning_rate: float = 1e-3,
+        loss_function: str = "MSE",
+    ):
+        """
+        Initialize FNO model with neuralop backend.
+        
+        Args:
+            n_modes: Number of Fourier modes to keep along each dimension (tuple of ints)
+            hidden_channels: Width of the FNO layers
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+            n_layers: Number of FNO layers
+            non_linearity: Activation function
+            stabilizer: Stabilization method ('tanh', None)
+            norm: Normalization method ('ada_in', 'group_norm', 'instance_norm', None)
+            preactivation: Whether to use pre-activation
+            fno_skip: Type of skip connection for FNO ('linear', 'identity', 'soft-gating')
+            separable: Whether to use separable convolutions
+            factorization: Type of factorization ('tucker', 'tt', 'cp', None)
+            rank: Rank for factorization (float for percentage, int for absolute)
+            fixed_rank_modes: Whether to use fixed rank modes
+            implementation: Implementation type ('factorized', 'reconstructed')
+            decomposition_kwargs: Additional kwargs for tensor decomposition
+            domain_padding: Amount of domain padding
+            learning_rate: Learning rate for optimizer
+            loss_function: Loss function name ("MSE", "MSE+Grad")
+        """
+        super().__init__(learning_rate=learning_rate, loss_function=loss_function)
+        
+        self.save_hyperparameters()
+        
+        fno_kwargs = {
+            'n_modes': n_modes,
+            'hidden_channels': hidden_channels,
+            'in_channels': in_channels,
+            'out_channels': out_channels,
+            'n_layers': n_layers,
+            'non_linearity': non_linearity,
+            'preactivation': preactivation,
+            'fno_skip': fno_skip,
+            'separable': separable,
+            'rank': rank,
+            'fixed_rank_modes': fixed_rank_modes,
+            'implementation': implementation,
+        }
+        
+        if stabilizer is not None:
+            fno_kwargs['stabilizer'] = stabilizer
+        if norm is not None:
+            fno_kwargs['norm'] = norm
+        if factorization is not None:
+            fno_kwargs['factorization'] = factorization
+        if decomposition_kwargs is not None:
+            fno_kwargs['decomposition_kwargs'] = decomposition_kwargs
+        if domain_padding is not None:
+            fno_kwargs['domain_padding'] = domain_padding
+        
+        self.fno = FNO(**fno_kwargs)
+    
+    def forward(self, x):
+        # Handle input shape: if [B, T, X, Y], convert to [B, C, T, X, Y]
+        if x.ndim == 4:
+            x = x.unsqueeze(1)  # Add channel dimension
+        
+        return self.fno(x)

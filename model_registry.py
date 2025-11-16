@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 import lightning as L
-from models import FNOModel
+from basmodel import FNOModel
 
 
 @dataclass(frozen=True)
@@ -17,28 +17,35 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
     'fno': ModelSpec(
         name='FNO',
         model_class=FNOModel,
-        description='Fourier Neural Operator for plasma simulation.',
+        description='Fourier Neural Operator with neuralop backend for plasma simulation.',
         default_params={
-            'in_neurons': 32,
-            'hidden_neurons': 64,
-            'out_neurons': 32,
-            'modesSpace': 8,
-            'modesTime': 8,
-            'input_size': 4,
+            'n_modes': (8, 8, 8),
+            'hidden_channels': 64,
+            'in_channels': 4,
+            'out_channels': 1,
+            'n_layers': 4,
+            'stabilizer': None,
+            'norm': None,
+            'preactivation': False,
+            'fno_skip': 'linear',
+            'separable': False,
+            'factorization': None,
+            'rank': 1.0,
+            'fixed_rank_modes': False,
+            'implementation': 'factorized',
+            'decomposition_kwargs': None,
+            'domain_padding': None,
             'learning_rate': 1e-3,
-            'restart_at_epoch_n': 0,
-            'loss_function': 'L2',
+            'loss_function': 'MSE',
         },
     ),
 }
 
 def available_models() -> Tuple[str, ...]:
-    """Return tuple of available model names."""
     return tuple(MODEL_REGISTRY.keys())
 
 
 def resolve_model(name: str) -> ModelSpec:
-    """Get model specification by name."""
     key = name.lower()
     if key not in MODEL_REGISTRY:
         available = ', '.join(MODEL_REGISTRY.keys())
@@ -65,8 +72,9 @@ def build_model(
     }
     
     print(f'Built {spec.name}: {spec.description}')
-    print(f'  Neurons: in={params["in_neurons"]}, hidden={params["hidden_neurons"]}, out={params["out_neurons"]}')
-    print(f'  Modes: space={params["modesSpace"]}, time={params["modesTime"]}')
+    print(f'  Modes: {params.get("n_modes", "N/A")}')
+    print(f'  Hidden channels: {params.get("hidden_channels", "N/A")}')
+    print(f'  Layers: {params.get("n_layers", "N/A")}')
     print(f'  Learning rate: {params["learning_rate"]}, Loss: {params["loss_function"]}')
     
     return model, model_config
@@ -79,6 +87,12 @@ def rebuild_model_from_config(model_config: dict) -> L.LightningModule:
     )[0]
 
 
+def load_model_from_checkpoint(checkpoint_path: str, model_name: str = 'fno') -> L.LightningModule:
+    spec = resolve_model(model_name)
+    model = spec.model_class.load_from_checkpoint(checkpoint_path)
+    return model
+
+
 
 __all__ = [
     'ModelSpec',
@@ -86,5 +100,6 @@ __all__ = [
     'resolve_model',
     'build_model',
     'rebuild_model_from_config',
+    'load_model_from_checkpoint',
     'MODEL_REGISTRY',
 ]
