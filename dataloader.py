@@ -2,12 +2,13 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import numpy as np
-from boutdata import collect 
+from boutdata import collect
+import torch.nn.functional as F
 
 DEFAULT_DATA_ROOTS = {
-    'data': Path('/data/')
+    'data': Path('/dtu/blackhole/16/223702/data')
 }
 
 @dataclass(frozen=True)
@@ -16,11 +17,12 @@ class DataLoaderConfig:
     val_split: float = 0.15
     test_split: float = 0.15
     batch_size: int = 16
-    num_workers: int = 4
-    pin_memory: bool = True
+    num_workers: int = 0  # Changed from 4 to 0 for CPU RAM loading
+    pin_memory: bool = False  # Changed from True to False to keep data in CPU RAM
     seed: int = 21
     shuffle: bool = False
     data_root: Path = DEFAULT_DATA_ROOTS['data']
+    spatial_resolution: Optional[int] = 256  # Target resolution (default: downsample 1024->256)
 
 
 def _tensor_to_sequences(
@@ -37,15 +39,37 @@ def _tensor_to_sequences(
 
 
 class PlasmaDataset(Dataset):
-    def __init__(self, data: List[torch.Tensor], targets: List[torch.Tensor]):
+    def __init__(self, data: List[torch.Tensor], targets: List[torch.Tensor], spatial_resolution: Optional[int] = None):
         self.data = data
         self.targets = targets
+        self.spatial_resolution = spatial_resolution
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.data[idx], self.targets[idx]
+        x = self.data[idx]  # [T, X, Y]
+        y = self.targets[idx]  # [T, X, Y]
+        
+        # Downsample if spatial_resolution is specified
+        if self.spatial_resolution is not None:
+            T, X, Y = x.shape
+            if X != self.spatial_resolution or Y != self.spatial_resolution:
+                # Reshape to [T, 1, X, Y] for interpolation
+                x = x.unsqueeze(1)
+                y = y.unsqueeze(1)
+                
+                # Downsample using bilinear interpolation
+                x = F.interpolate(x, size=(self.spatial_resolution, self.spatial_resolution), 
+                                 mode='bilinear', align_corners=False)
+                y = F.interpolate(y, size=(self.spatial_resolution, self.spatial_resolution), 
+                                 mode='bilinear', align_corners=False)
+                
+                # Reshape back to [T, X, Y]
+                x = x.squeeze(1)
+                y = y.squeeze(1)
+        
+        return x, y
 
 
 def build_dataloader(
@@ -59,6 +83,7 @@ def build_dataloader(
     seed: int = DataLoaderConfig.seed,
     shuffle: bool = DataLoaderConfig.shuffle,
     data_root: Path = DataLoaderConfig.data_root,
+    spatial_resolution: Optional[int] = DataLoaderConfig.spatial_resolution,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     assert abs(train_split + val_split + test_split - 1.0) == 0, \
@@ -83,7 +108,7 @@ def build_dataloader(
     splits = [(X_train, y_train), (X_val, y_val), (X_test, y_test)]
     train_loader, val_loader, test_loader = [
         DataLoader(
-            PlasmaDataset(X, y),
+            PlasmaDataset(X, y, spatial_resolution=spatial_resolution),
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
@@ -91,5 +116,7 @@ def build_dataloader(
         )
         for X, y in splits
     ]
+    
+    print(f"Data loaded: Original size, target resolution: {spatial_resolution if spatial_resolution else 'original'}")
     
     return train_loader, val_loader, test_loader

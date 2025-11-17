@@ -4,7 +4,9 @@ from pathlib import Path
 import torch
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+from lightning.pytorch.loggers import TensorBoardLogger
 from tqdm import tqdm
+from datetime import datetime
 
 from model_registry import build_model, available_models, load_model_from_checkpoint
 from dataloader import build_dataloader
@@ -52,6 +54,12 @@ def _build_args() -> argparse.Namespace:
         type=int,
         default=42,
         help='Random seed for reproducibility'
+    )
+    parser.add_argument(
+        '--spatial_resolution',
+        type=int,
+        default=256,
+        help='Target spatial resolution for downsampling (e.g., 256 to downsample 1024x1024 to 256x256)'
     )
     
     # Training parameters
@@ -132,6 +140,20 @@ def _build_args() -> argparse.Namespace:
         default='outputs',
         help='Directory to save inference outputs'
     )
+    
+    # Logging
+    parser.add_argument(
+        '--log_dir',
+        type=str,
+        default='logs',
+        help='Directory for TensorBoard logs'
+    )
+    parser.add_argument(
+        '--num_images_to_log',
+        type=int,
+        default=1,
+        help='Number of prediction images to log per validation epoch'
+    )
 
     return parser.parse_args()
 
@@ -140,17 +162,18 @@ def _train(args):
     print(f'\nInitializing training for model "{args.model}"...\n')
     
     # Initialize and load overhead
-    with tqdm(total=3, desc='Setup', unit='step') as pbar:
+    with tqdm(total=3, desc='Initializing', unit='step', bar_format='{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}]') as pbar:
 
-        pbar.set_description('Building dataloaders')
+        pbar.set_description('Initializing: Building dataloaders')
         train_loader, val_loader, test_loader = build_dataloader(
             seq_len=args.seq_len,
             batch_size=args.batch_size,
             seed=args.seed,
+            spatial_resolution=args.spatial_resolution,
         )
         pbar.update(1)
         
-        pbar.set_description('Building model')
+        pbar.set_description('Initializing: Building model')
         overrides = {}
         if args.learning_rate is not None:
             overrides['learning_rate'] = args.learning_rate
@@ -166,7 +189,7 @@ def _train(args):
         model, model_config = build_model(args.model, **overrides)
         pbar.update(1)
         
-        pbar.set_description('Setting up trainer')
+        pbar.set_description('Initializing: Setting up trainer')
         callbacks = []
         checkpoint_callback = ModelCheckpoint(
             dirpath=args.checkpoint_dir,
@@ -187,9 +210,33 @@ def _train(args):
             )
             callbacks.append(early_stop_callback)
         
+        # Setup TensorBoard logger
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_name = f"{args.model}_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
+        logger = TensorBoardLogger(
+            save_dir=args.log_dir,
+            name=run_name,
+            default_hp_metric=False,
+        )
+        
+        # Log hyperparameters
+        logger.log_hyperparams({
+            'model': args.model,
+            'seq_len': args.seq_len,
+            'batch_size': args.batch_size,
+            'spatial_resolution': args.spatial_resolution,
+            'max_epochs': args.max_epochs,
+            'seed': args.seed,
+            **model_config['kwargs'],
+        })
+        
+        # Store num_images_to_log in model for validation_step
+        model.num_images_to_log = args.num_images_to_log
+        
         trainer = L.Trainer(
             max_epochs=args.max_epochs,
             callbacks=callbacks,
+            logger=logger,
             accelerator='auto',
             devices='auto',
             log_every_n_steps=10,
@@ -224,6 +271,7 @@ def _inference(args):
             seq_len=args.seq_len,
             batch_size=args.batch_size,
             seed=args.seed,
+            spatial_resolution=args.spatial_resolution,
         )
         pbar.update(1)
         

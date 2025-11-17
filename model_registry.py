@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 import lightning as L
-from basmodel import FNOModel
+from model import FNOModel
 
 
 @dataclass(frozen=True)
@@ -21,8 +21,8 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         default_params={
             'n_modes': (8, 8, 8),
             'hidden_channels': 64,
-            'in_channels': 4,
-            'out_channels': 1,
+            'in_channels': 1,  # Single channel input (density field)
+            'out_channels': 1,  # Single channel output
             'n_layers': 4,
             'stabilizer': None,
             'norm': None,
