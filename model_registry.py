@@ -37,6 +37,11 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             'domain_padding': None,
             'learning_rate': 1e-3,
             'loss_function': 'MSE',
+            'num_predictions_to_log': 1,
+            'log_images_every_n_epochs': 1,
+            'max_image_logging_epochs': None,
+            'enable_val_image_logging': True,
+            'enable_inference_image_logging': False,
         },
     ),
 }

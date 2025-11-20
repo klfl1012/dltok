@@ -4,12 +4,17 @@ from pathlib import Path
 import torch
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from tqdm import tqdm
 from datetime import datetime
+import os
+from dotenv import load_dotenv
 
 from model_registry import build_model, available_models, load_model_from_checkpoint
 from dataloader import build_dataloader
+
+load_dotenv()
+
 
 def _build_args() -> argparse.Namespace:
 
@@ -149,10 +154,38 @@ def _build_args() -> argparse.Namespace:
         help='Directory for TensorBoard logs'
     )
     parser.add_argument(
-        '--num_images_to_log',
+        '--num_predictions_to_log',
         type=int,
         default=1,
-        help='Number of prediction images to log per validation epoch'
+        help='Number of sequence predictions to log per validation epoch (each prediction shows all timesteps)'
+    )
+    parser.add_argument(
+        '--disable_val_image_logging',
+        action='store_true',
+        help='Disable image logging during validation (overrides model default)'
+    )
+    parser.add_argument(
+        '--enable_inference_image_logging',
+        action='store_true',
+        help='Enable image logging during inference/predict using the same sequence visualization'
+    )
+    parser.add_argument(
+        '--use_wandb',
+        action='store_true',
+        default=False,
+        help='Use Weights & Biases for logging instead of TensorBoard'
+    )
+    parser.add_argument(
+        '--wandb_project',
+        type=str,
+        default='plasma-simulation',
+        help='WandB project name'
+    )
+    parser.add_argument(
+        '--wandb_entity',
+        type=str,
+        default=None,
+        help='WandB entity (username or team name)'
     )
 
     return parser.parse_args()
@@ -185,6 +218,12 @@ def _train(args):
             overrides['hidden_channels'] = args.hidden_channels
         if args.n_layers is not None:
             overrides['n_layers'] = args.n_layers
+        if args.num_predictions_to_log is not None:
+            overrides['num_predictions_to_log'] = args.num_predictions_to_log
+        if args.disable_val_image_logging:
+            overrides['enable_val_image_logging'] = False
+        if args.enable_inference_image_logging:
+            overrides['enable_inference_image_logging'] = True
         
         model, model_config = build_model(args.model, **overrides)
         pbar.update(1)
@@ -210,14 +249,36 @@ def _train(args):
             )
             callbacks.append(early_stop_callback)
         
-        # Setup TensorBoard logger
+        # Setup logger (WandB or TensorBoard)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         run_name = f"{args.model}_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
-        logger = TensorBoardLogger(
-            save_dir=args.log_dir,
-            name=run_name,
-            default_hp_metric=False,
-        )
+        
+        if args.use_wandb:
+            api_key = os.environ.get('WANDB_API_KEY')
+            if api_key:
+                os.environ['WANDB_API_KEY'] = api_key
+            else:
+                print("Warning: No WandB API key found in .env file or environment variables.")
+                print("Please set WANDB_API_KEY in your .env file or as an environment variable.")
+                print("Falling back to TensorBoard logging.")
+                args.use_wandb = False
+        
+        if args.use_wandb:
+            logger = WandbLogger(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=run_name,
+                save_dir=args.log_dir,
+                log_model=True,  
+            )
+            print(f"Using Weights & Biases logging (Project: {args.wandb_project})")
+        else:
+            logger = TensorBoardLogger(
+                save_dir=args.log_dir,
+                name=run_name,
+                default_hp_metric=False,
+            )
+            print("Using TensorBoard logging")
         
         # Log hyperparameters
         logger.log_hyperparams({
@@ -229,9 +290,6 @@ def _train(args):
             'seed': args.seed,
             **model_config['kwargs'],
         })
-        
-        # Store num_images_to_log in model for validation_step
-        model.num_images_to_log = args.num_images_to_log
         
         trainer = L.Trainer(
             max_epochs=args.max_epochs,
@@ -252,6 +310,10 @@ def _train(args):
         trainer.test(model, test_loader, ckpt_path='best')
     
     print(f'\nTraining complete! Best checkpoint: {checkpoint_callback.best_model_path}\n')
+    
+    if args.use_wandb:
+        import wandb
+        wandb.finish()
 
 
 def _inference(args):

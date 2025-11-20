@@ -2,11 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from abc import abstractmethod
 from neuralop import FNO
 import matplotlib.pyplot as plt
 import numpy as np
+
+# TODO: Inference fn visualisation of more than one consecutive time step samples, so like 5 or more seq len
 
 
 class GradientLoss(nn.Module):
@@ -44,13 +46,19 @@ class MSEWithGradientLoss(nn.Module):
 class BaseModel(L.LightningModule):
     """Base class for all models with shared training/validation/test logic."""
     
-    def __init__(self, learning_rate: float, loss_function: str):
+    def __init__(self, learning_rate: float, loss_function: str, num_predictions_to_log: int = 1, log_images_every_n_epochs: int = 1, max_image_logging_epochs: int | None = None, enable_val_image_logging: bool = True, enable_inference_image_logging: bool = False):
         super().__init__()
         self.learning_rate = learning_rate
         self.loss_name = loss_function
-        self.num_images_to_log = 1  # Default, can be overridden
+        self.num_predictions_to_log = num_predictions_to_log  # Number of sequence predictions to visualize
+        self.log_images_every_n_epochs = max(1, int(log_images_every_n_epochs))
+        self.max_image_logging_epochs = max_image_logging_epochs  # None = no global cap
+        self._image_logging_epochs = 0
+        self.enable_val_image_logging = enable_val_image_logging
+        self.enable_inference_image_logging = enable_inference_image_logging
         
-        # Loss function setup
+        self.validation_step_outputs = []
+        
         if loss_function == "MSE":
             self.loss_function = F.mse_loss
         elif loss_function == "MSE+Grad":
@@ -67,7 +75,6 @@ class BaseModel(L.LightningModule):
         y_hat = self(x)
         train_loss = self.loss_function(y_hat, y)
         
-        # Log metrics
         log_dict = {
             f"train_{self.loss_name}_loss": train_loss,
             "learning_rate": self.learning_rate
@@ -77,7 +84,7 @@ class BaseModel(L.LightningModule):
             prog_bar=True, 
             on_step=True, 
             on_epoch=True,
-            logger=True  # Ensures TensorBoard logging
+            logger=True  
         )
         
         return train_loss
@@ -87,7 +94,6 @@ class BaseModel(L.LightningModule):
         y_hat = self(x)
         val_loss = self.loss_function(y_hat, y)
         
-        # Log metrics
         self.log(
             f"val_{self.loss_name}_loss", 
             val_loss, 
@@ -97,9 +103,16 @@ class BaseModel(L.LightningModule):
             logger=True
         )
         
-        # Log prediction images (only first batch of each epoch)
-        if batch_idx == 0 and self.logger is not None:
-            self._log_predictions_as_images(x, y, y_hat, prefix='val')
+        # Store outputs from first batch for end-of-epoch image logging
+        if self.enable_val_image_logging and batch_idx == 0:
+            # Store up to num_predictions_to_log samples
+            num_samples = min(self.num_predictions_to_log, x.shape[0])
+            for i in range(num_samples):
+                self.validation_step_outputs.append({
+                    'x': x[i:i+1].detach().cpu(),
+                    'y_true': y[i:i+1].detach().cpu(),
+                    'y_pred': y_hat[i:i+1].detach().cpu()
+                })
         
         return val_loss
     
@@ -122,75 +135,134 @@ class BaseModel(L.LightningModule):
     
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         x, y = batch
-        return self(x), y
+        y_hat = self(x)
+
+        # Optional image logging during inference
+        if self.enable_inference_image_logging and batch_idx == 0 and self.logger is not None:
+            # Log up to num_predictions_to_log samples from the first batch
+            num_samples = min(self.num_predictions_to_log, x.shape[0])
+            for i in range(num_samples):
+                self._log_predictions_as_images(
+                    x[i:i+1].detach().cpu(),
+                    y[i:i+1].detach().cpu(),
+                    y_hat[i:i+1].detach().cpu(),
+                    prefix='inference',
+                    sample_idx=i,
+                )
+
+        return y_hat, y
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
     
     def on_train_epoch_end(self):
-        # Log current epoch number
         self.log("epoch", float(self.current_epoch), logger=True)
     
     def on_validation_epoch_end(self):
-        pass
+        """Log images only on selected epochs to avoid flooding logs."""
+        if not self.enable_val_image_logging:
+            self.validation_step_outputs.clear()
+            return
+
+        should_log = False
+
+        if self.max_image_logging_epochs is not None:
+            if self._image_logging_epochs < self.max_image_logging_epochs:
+                should_log = True
+        else:
+            should_log = True
+
+        if should_log:
+            if (int(self.current_epoch) % self.log_images_every_n_epochs) != 0:
+                should_log = False
+
+        if should_log and len(self.validation_step_outputs) > 0 and self.logger is not None:
+            for idx, outputs in enumerate(self.validation_step_outputs):
+                x = outputs['x']
+                y_true = outputs['y_true']
+                y_pred = outputs['y_pred']
+
+                self._log_predictions_as_images(x, y_true, y_pred, prefix='val', sample_idx=idx)
+
+            self._image_logging_epochs += 1
+        
+        # Clear stored outputs for next epoch
+        self.validation_step_outputs.clear()
     
-    def _log_predictions_as_images(self, x, y_true, y_pred, prefix='val'):
+    def _log_predictions_as_images(self, x, y_true, y_pred, prefix='val', sample_idx=0):
         """
-        Log predictions as images to TensorBoard.
+        Log predictions as images to TensorBoard or WandB.
+        Each prediction consists of multiple timestep images (the full sequence length).
         
         Args:
-            x: Input tensor [B, T, X, Y]
+            x: Input tensor [B, T, X, Y] where B=1 (single sample)
             y_true: Ground truth [B, T, X, Y]
             y_pred: Predictions [B, T, X, Y]
             prefix: Prefix for logging ('val' or 'test')
+            sample_idx: Index of the sample being logged (for multiple predictions per epoch)
         """
         try:
-            num_samples = min(self.num_images_to_log, x.shape[0])
+            batch_idx = 0  # Always 0 since we store individual samples
+            seq_len = y_true.shape[1]
             
-            for i in range(num_samples):
-                # Take middle timestep for visualization
-                mid_t = y_true.shape[1] // 2
+            if y_true.is_cuda:
+                y_true_np = y_true[batch_idx].cpu().numpy()
+                y_pred_np = y_pred[batch_idx].cpu().numpy()
+            else:
+                y_true_np = y_true[batch_idx].numpy()
+                y_pred_np = y_pred[batch_idx].numpy()
+            
+            timesteps_to_show = list(range(seq_len))
+            num_timesteps = seq_len
+            
+            fig, axes = plt.subplots(3, num_timesteps, figsize=(4 * num_timesteps, 12))
+            
+            if num_timesteps == 1:
+                axes = axes.reshape(-1, 1)
+            
+            for col_idx, t in enumerate(timesteps_to_show):
+                true_frame = y_true_np[t]
+                pred_frame = y_pred_np[t]
+                error_frame = np.abs(true_frame - pred_frame)
                 
-                true_frame = y_true[i, mid_t].detach().cpu().numpy()
-                pred_frame = y_pred[i, mid_t].detach().cpu().numpy()
+                im0 = axes[0, col_idx].imshow(true_frame, cmap='viridis', aspect='auto')
+                axes[0, col_idx].set_title(f'Ground Truth (t={t})')
+                axes[0, col_idx].axis('off')
+                plt.colorbar(im0, ax=axes[0, col_idx], fraction=0.046)
                 
-                # Create comparison plot with fixed compact size
-                fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                im1 = axes[1, col_idx].imshow(pred_frame, cmap='viridis', aspect='auto')
+                axes[1, col_idx].set_title(f'Prediction (t={t})')
+                axes[1, col_idx].axis('off')
+                plt.colorbar(im1, ax=axes[1, col_idx], fraction=0.046)
                 
-                # Ground truth
-                im0 = axes[0].imshow(true_frame, cmap='viridis', aspect='auto')
-                axes[0].set_title(f'Ground Truth (t={mid_t})')
-                axes[0].axis('off')
-                plt.colorbar(im0, ax=axes[0], fraction=0.046)
-                
-                # Prediction
-                im1 = axes[1].imshow(pred_frame, cmap='viridis', aspect='auto')
-                axes[1].set_title(f'Prediction (t={mid_t})')
-                axes[1].axis('off')
-                plt.colorbar(im1, ax=axes[1], fraction=0.046)
-                
-                # Absolute error
-                diff = np.abs(true_frame - pred_frame)
-                im2 = axes[2].imshow(diff, cmap='hot', aspect='auto')
-                axes[2].set_title(f'Absolute Error')
-                axes[2].axis('off')
-                plt.colorbar(im2, ax=axes[2], fraction=0.046)
-                
-                plt.tight_layout()
-                
-                # Log to TensorBoard
-                if isinstance(self.logger, TensorBoardLogger) and hasattr(self.logger, 'experiment'):
-                    self.logger.experiment.add_figure(
-                        f'{prefix}/predictions_sample_{i}',
-                        fig,
-                        global_step=self.current_epoch
-                    )
-                
-                plt.close(fig)
+                im2 = axes[2, col_idx].imshow(error_frame, cmap='hot', aspect='auto')
+                axes[2, col_idx].set_title(f'Abs Error (t={t})')
+                axes[2, col_idx].axis('off')
+                plt.colorbar(im2, ax=axes[2, col_idx], fraction=0.046)
+            
+            plt.tight_layout()
+            
+            # Use sample_idx in key name for multiple predictions
+            key_suffix = f'_sample_{sample_idx}' if self.num_predictions_to_log > 1 else ''
+            
+            if isinstance(self.logger, TensorBoardLogger) and hasattr(self.logger, 'experiment'):
+                self.logger.experiment.add_figure(
+                    f'{prefix}/predictions_sequence{key_suffix}',
+                    fig,
+                    global_step=self.current_epoch
+                )
+            elif isinstance(self.logger, WandbLogger):
+                self.logger.log_image(
+                    key=f'{prefix}/predictions_sequence{key_suffix}',
+                    images=[fig],
+                    step=self.current_epoch
+                )
+            
+            plt.close(fig)
         
         except Exception as e:
-            print(f"Warning: Could not log images to TensorBoard: {e}")
+            print(f"Warning: Could not log images: {e}")
 
 
 
@@ -219,6 +291,11 @@ class FNOModel(BaseModel):
         domain_padding: float | None = None,
         learning_rate: float = 1e-3,
         loss_function: str = "MSE",
+        num_predictions_to_log: int = 1,
+        log_images_every_n_epochs: int = 1,
+        max_image_logging_epochs: int | None = None,
+        enable_val_image_logging: bool = True,
+        enable_inference_image_logging: bool = False,
     ):
         """
         Initialize FNO model with neuralop backend.
@@ -243,8 +320,21 @@ class FNOModel(BaseModel):
             domain_padding: Amount of domain padding
             learning_rate: Learning rate for optimizer
             loss_function: Loss function name ("MSE", "MSE+Grad")
+            num_predictions_to_log: Number of sequence predictions to visualize per validation epoch
+            log_images_every_n_epochs: Log images only every Nth validation epoch
+            max_image_logging_epochs: Global cap on how many epochs log images (None = no cap)
+            enable_val_image_logging: Whether to log images during validation
+            enable_inference_image_logging: Whether to log images during inference/predict
         """
-        super().__init__(learning_rate=learning_rate, loss_function=loss_function)
+        super().__init__(
+            learning_rate=learning_rate,
+            loss_function=loss_function,
+            num_predictions_to_log=num_predictions_to_log,
+            log_images_every_n_epochs=log_images_every_n_epochs,
+            max_image_logging_epochs=max_image_logging_epochs,
+            enable_val_image_logging=enable_val_image_logging,
+            enable_inference_image_logging=enable_inference_image_logging,
+        )
         
         self.save_hyperparameters()
         
