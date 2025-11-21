@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 import torch
 import lightning as L
@@ -9,6 +10,9 @@ from tqdm import tqdm
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+
+from copy import deepcopy
+from itertools import product
 
 from model_registry import build_model, available_models, load_model_from_checkpoint
 from dataloader import build_dataloader
@@ -188,6 +192,20 @@ def _build_args() -> argparse.Namespace:
         help='WandB entity (username or team name)'
     )
 
+    # Ablation study controls
+    parser.add_argument(
+        '--ablation_study',
+        action='store_true',
+        help='Enable automated ablation study across seq_len and/or spatial_resolution (train mode only)'
+    )
+    parser.add_argument(
+        '--ablation_mode',
+        type=str,
+        choices=['seq_len', 'spatial_resolution', 'grid'],
+        default='grid',
+        help='Ablation strategy: vary seq_len only, spatial_resolution only, or run the Cartesian grid'
+    )
+
     return parser.parse_args()
 
 
@@ -316,6 +334,36 @@ def _train(args):
         wandb.finish()
 
 
+def _run_ablation(args):
+    """Execute a small ablation study across seq_len and/or spatial resolution."""
+
+    @dataclass(frozen=True)
+    class AblationDefaults:
+        seq_lens: tuple[int, ...] = (32, 64, 96, 128)
+        spatial_resolutions: tuple[int, ...] = (128, 192, 256)
+
+    seq_values = AblationDefaults.seq_lens
+    res_values = AblationDefaults.spatial_resolutions
+
+    if args.ablation_mode == 'seq_len':
+        combos = [(seq, args.spatial_resolution) for seq in seq_values]
+    elif args.ablation_mode == 'spatial_resolution':
+        combos = [(args.seq_len, res) for res in res_values]
+    else:  
+        combos = list(product(seq_values, res_values))
+
+    total_runs = len(combos)
+    print(f"\nStarting ablation study ({total_runs} runs) with mode='{args.ablation_mode}'\n")
+
+    for idx, (seq_len, spat_res) in enumerate(combos, start=1):
+        print(f"\n[Ablation {idx}/{total_runs}] seq_len={seq_len}, spatial_resolution={spat_res}\n")
+        run_args = deepcopy(args)
+        run_args.ablation_study = False  # Prevent recursion
+        run_args.seq_len = seq_len
+        run_args.spatial_resolution = spat_res
+        _train(run_args)
+
+
 def _inference(args):
 
     if not args.checkpoint:
@@ -364,8 +412,13 @@ def main():
     args = _build_args()
     
     if args.mode == 'train':
-        _train(args)
+        if args.ablation_study:
+            _run_ablation(args)
+        else:
+            _train(args)
     elif args.mode == 'inference':
+        if args.ablation_study:
+            raise ValueError('--ablation_study is only supported in train mode')
         _inference(args)
 
 
