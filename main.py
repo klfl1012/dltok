@@ -339,8 +339,8 @@ def _run_ablation(args):
 
     @dataclass(frozen=True)
     class AblationDefaults:
-        seq_lens: tuple[int, ...] = (32, 64, 96, 128)
-        spatial_resolutions: tuple[int, ...] = (128, 192, 256)
+        seq_lens: tuple[int, ...] = (1, 2, 3, 4, 5)
+        spatial_resolutions: tuple[int, ...] = (64, 128, 256, 512)
 
     seq_values = AblationDefaults.seq_lens
     res_values = AblationDefaults.spatial_resolutions
