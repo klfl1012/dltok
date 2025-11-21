@@ -10,7 +10,6 @@ from tqdm import tqdm
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-
 from copy import deepcopy
 from itertools import product
 
@@ -164,8 +163,9 @@ def _build_args() -> argparse.Namespace:
         help='Number of sequence predictions to log per validation epoch (each prediction shows all timesteps)'
     )
     parser.add_argument(
-        '--disable_val_image_logging',
+        '--enable_val_image_logging',
         action='store_true',
+        default=False,
         help='Disable image logging during validation (overrides model default)'
     )
     parser.add_argument(
