@@ -166,7 +166,7 @@ def _build_args() -> argparse.Namespace:
         '--enable_val_image_logging',
         action='store_true',
         default=False,
-        help='Disable image logging during validation (overrides model default)'
+        help='Enable image logging during validation (overrides model default)'
     )
     parser.add_argument(
         '--enable_inference_image_logging',
@@ -190,6 +190,12 @@ def _build_args() -> argparse.Namespace:
         type=str,
         default=None,
         help='WandB entity (username or team name)'
+    )
+
+    parser.add_argument(
+        '--run_inference_after_train',
+        action='store_true',
+        help='After training finishes, immediately run inference using the best checkpoint'
     )
 
     # Ablation study controls
@@ -238,29 +244,39 @@ def _train(args):
             overrides['n_layers'] = args.n_layers
         if args.num_predictions_to_log is not None:
             overrides['num_predictions_to_log'] = args.num_predictions_to_log
-        if args.disable_val_image_logging:
-            overrides['enable_val_image_logging'] = False
+        if args.enable_val_image_logging:
+            overrides['enable_val_image_logging'] = True
         if args.enable_inference_image_logging:
             overrides['enable_inference_image_logging'] = True
         
         model, model_config = build_model(args.model, **overrides)
+        monitor_metric = f"val_{model.loss_name}_loss"
+
+        print(
+            "Configured run:" 
+            f" seq_len={args.seq_len},"
+            f" spatial_resolution={args.spatial_resolution},"
+            f" n_layers={model_config['kwargs'].get('n_layers')},"
+            f" hidden_channels={model_config['kwargs'].get('hidden_channels')},"
+            f" n_modes={model_config['kwargs'].get('n_modes')}"
+        )
         pbar.update(1)
         
         pbar.set_description('Initializing: Setting up trainer')
         callbacks = []
         checkpoint_callback = ModelCheckpoint(
             dirpath=args.checkpoint_dir,
-            filename=f'{args.model}-{{epoch:02d}}-{{val_MSE_loss:.4f}}',
-            monitor='val_MSE_loss',
+            filename=f'{args.model}-best',
+            monitor=monitor_metric,
             mode='min',
-            save_top_k=3,
-            save_last=True,
+            save_top_k=1,
+            save_last=False,
         )
         callbacks.append(checkpoint_callback)
         
         if args.early_stopping:
             early_stop_callback = EarlyStopping(
-                monitor='val_MSE_loss',
+                monitor=monitor_metric,
                 patience=args.patience,
                 mode='min',
                 verbose=True,
@@ -327,6 +343,18 @@ def _train(args):
         print(f'\nTesting best model...')
         trainer.test(model, test_loader, ckpt_path='best')
     
+    if args.run_inference_after_train:
+        checkpoint_path = checkpoint_callback.best_model_path or checkpoint_callback.last_model_path
+        if checkpoint_path:
+            print(f'\nRunning post-training inference with checkpoint: {Path(checkpoint_path).name}\n')
+            inference_args = deepcopy(args)
+            inference_args.mode = 'inference'
+            inference_args.checkpoint = checkpoint_path
+            inference_args.run_inference_after_train = False
+            _inference(inference_args)
+        else:
+            print('\nWarning: No checkpoint available for post-training inference. Skipping.\n')
+
     print(f'\nTraining complete! Best checkpoint: {checkpoint_callback.best_model_path}\n')
     
     if args.use_wandb:

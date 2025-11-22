@@ -46,7 +46,7 @@ class MSEWithGradientLoss(nn.Module):
 class BaseModel(L.LightningModule):
     """Base class for all models with shared training/validation/test logic."""
     
-    def __init__(self, learning_rate: float, loss_function: str, num_predictions_to_log: int = 1, log_images_every_n_epochs: int = 1, max_image_logging_epochs: int | None = None, enable_val_image_logging: bool = True, enable_inference_image_logging: bool = False):
+    def __init__(self, learning_rate: float, loss_function: str, num_predictions_to_log: int = 1, log_images_every_n_epochs: int = 1, max_image_logging_epochs: int | None = None, enable_val_image_logging: bool = False, enable_inference_image_logging: bool = False):
         super().__init__()
         self.learning_rate = learning_rate
         self.loss_name = loss_function
@@ -294,7 +294,7 @@ class FNOModel(BaseModel):
         num_predictions_to_log: int = 1,
         log_images_every_n_epochs: int = 1,
         max_image_logging_epochs: int | None = None,
-        enable_val_image_logging: bool = True,
+        enable_val_image_logging: bool = False,
         enable_inference_image_logging: bool = False,
     ):
         """
