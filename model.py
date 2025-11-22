@@ -296,6 +296,7 @@ class FNOModel(BaseModel):
         max_image_logging_epochs: int | None = None,
         enable_val_image_logging: bool = False,
         enable_inference_image_logging: bool = False,
+        data_config: dict | None = None,
     ):
         """
         Initialize FNO model with neuralop backend.
@@ -325,6 +326,7 @@ class FNOModel(BaseModel):
             max_image_logging_epochs: Global cap on how many epochs log images (None = no cap)
             enable_val_image_logging: Whether to log images during validation
             enable_inference_image_logging: Whether to log images during inference/predict
+            data_config: Optional dict describing the data settings used for training
         """
         super().__init__(
             learning_rate=learning_rate,
@@ -337,6 +339,7 @@ class FNOModel(BaseModel):
         )
         
         self.save_hyperparameters()
+        self.data_config = data_config
         
         fno_kwargs = {
             'n_modes': n_modes,

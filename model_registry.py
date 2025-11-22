@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 import lightning as L
 from model import FNOModel
+import torch
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             'max_image_logging_epochs': None,
             'enable_val_image_logging': False,
             'enable_inference_image_logging': False,
+            'data_config': None,
         },
     ),
 }
@@ -92,9 +94,54 @@ def rebuild_model_from_config(model_config: dict) -> L.LightningModule:
     )[0]
 
 
-def load_model_from_checkpoint(checkpoint_path: str, model_name: str = 'fno') -> L.LightningModule:
+def load_checkpoint_data(
+    checkpoint_path: str,
+    map_location: torch.device | str | None = None,
+    weights_only: bool = False,
+) -> dict:
+    if map_location is not None:
+        resolved_location = map_location
+    elif torch.cuda.is_available():
+        resolved_location = torch.device('cuda')
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        resolved_location = torch.device('mps')
+    else:
+        resolved_location = torch.device('cpu')
+    try:
+        return torch.load(
+            checkpoint_path,
+            map_location=resolved_location,
+            weights_only=weights_only,
+        )
+    except TypeError:
+        # Older PyTorch versions do not support the weights_only argument.
+        return torch.load(
+            checkpoint_path,
+            map_location=resolved_location,
+        )
+
+
+def load_model_from_checkpoint(
+    checkpoint_path: str,
+    model_name: str = 'fno',
+    checkpoint_data: dict | None = None,
+    map_location: torch.device | str | None = None,
+    weights_only: bool = False,
+) -> L.LightningModule:
     spec = resolve_model(model_name)
-    model = spec.model_class.load_from_checkpoint(checkpoint_path)
+
+    checkpoint = checkpoint_data or load_checkpoint_data(
+        checkpoint_path,
+        map_location=map_location,
+        weights_only=weights_only,
+    )
+    state_dict = checkpoint.get('state_dict', {})
+    state_dict.pop('_metadata', None)
+
+    hyper_parameters = checkpoint.get('hyper_parameters', {})
+    model = spec.model_class(**hyper_parameters)
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
     return model
 
 
@@ -106,5 +153,6 @@ __all__ = [
     'build_model',
     'rebuild_model_from_config',
     'load_model_from_checkpoint',
+    'load_checkpoint_data',
     'MODEL_REGISTRY',
 ]

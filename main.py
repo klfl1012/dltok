@@ -6,14 +6,18 @@ import torch
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-from tqdm import tqdm
 from datetime import datetime
 import os
 from dotenv import load_dotenv
 from copy import deepcopy
 from itertools import product
 
-from model_registry import build_model, available_models, load_model_from_checkpoint
+from model_registry import (
+    build_model,
+    available_models,
+    load_model_from_checkpoint,
+    load_checkpoint_data,
+)
 from dataloader import build_dataloader
 
 load_dotenv()
@@ -197,6 +201,11 @@ def _build_args() -> argparse.Namespace:
         action='store_true',
         help='After training finishes, immediately run inference using the best checkpoint'
     )
+    parser.add_argument(
+        '--ignore_checkpoint_data_config',
+        action='store_true',
+        help='Use CLI data params during inference instead of those saved in the checkpoint'
+    )
 
     # Ablation study controls
     parser.add_argument(
@@ -217,124 +226,127 @@ def _build_args() -> argparse.Namespace:
 
 def _train(args):
     print(f'\nInitializing training for model "{args.model}"...\n')
+    wandb_closed = False
     
-    # Initialize and load overhead
-    with tqdm(total=3, desc='Initializing', unit='step', bar_format='{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}]') as pbar:
+    print('Building dataloaders...')
+    train_loader, val_loader, test_loader = build_dataloader(
+        seq_len=args.seq_len,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        spatial_resolution=args.spatial_resolution,
+    )
 
-        pbar.set_description('Initializing: Building dataloaders')
-        train_loader, val_loader, test_loader = build_dataloader(
-            seq_len=args.seq_len,
-            batch_size=args.batch_size,
-            seed=args.seed,
-            spatial_resolution=args.spatial_resolution,
-        )
-        pbar.update(1)
-        
-        pbar.set_description('Initializing: Building model')
-        overrides = {}
-        if args.learning_rate is not None:
-            overrides['learning_rate'] = args.learning_rate
-        if args.loss_function is not None:
-            overrides['loss_function'] = args.loss_function
-        if args.n_modes is not None:
-            overrides['n_modes'] = tuple(map(int, args.n_modes.split(',')))
-        if args.hidden_channels is not None:
-            overrides['hidden_channels'] = args.hidden_channels
-        if args.n_layers is not None:
-            overrides['n_layers'] = args.n_layers
-        if args.num_predictions_to_log is not None:
-            overrides['num_predictions_to_log'] = args.num_predictions_to_log
-        if args.enable_val_image_logging:
-            overrides['enable_val_image_logging'] = True
-        if args.enable_inference_image_logging:
-            overrides['enable_inference_image_logging'] = True
-        
-        model, model_config = build_model(args.model, **overrides)
-        monitor_metric = f"val_{model.loss_name}_loss"
+    print('Building model...')
+    overrides = {}
+    data_config = {
+        'seq_len': args.seq_len,
+        'batch_size': args.batch_size,
+        'spatial_resolution': args.spatial_resolution,
+        'seed': args.seed,
+    }
+    if args.learning_rate is not None:
+        overrides['learning_rate'] = args.learning_rate
+    if args.loss_function is not None:
+        overrides['loss_function'] = args.loss_function
+    if args.n_modes is not None:
+        overrides['n_modes'] = tuple(map(int, args.n_modes.split(',')))
+    if args.hidden_channels is not None:
+        overrides['hidden_channels'] = args.hidden_channels
+    if args.n_layers is not None:
+        overrides['n_layers'] = args.n_layers
+    if args.num_predictions_to_log is not None:
+        overrides['num_predictions_to_log'] = args.num_predictions_to_log
+    if args.enable_val_image_logging:
+        overrides['enable_val_image_logging'] = True
+    if args.enable_inference_image_logging:
+        overrides['enable_inference_image_logging'] = True
+    overrides['data_config'] = data_config
 
-        print(
-            "Configured run:" 
-            f" seq_len={args.seq_len},"
-            f" spatial_resolution={args.spatial_resolution},"
-            f" n_layers={model_config['kwargs'].get('n_layers')},"
-            f" hidden_channels={model_config['kwargs'].get('hidden_channels')},"
-            f" n_modes={model_config['kwargs'].get('n_modes')}"
-        )
-        pbar.update(1)
-        
-        pbar.set_description('Initializing: Setting up trainer')
-        callbacks = []
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=args.checkpoint_dir,
-            filename=f'{args.model}-best',
+    model, model_config = build_model(args.model, **overrides)
+    monitor_metric = f"val_{model.loss_name}_loss"
+
+    print(
+        "Configured run:" 
+        f" seq_len={args.seq_len},"
+        f" spatial_resolution={args.spatial_resolution},"
+        f" n_layers={model_config['kwargs'].get('n_layers')},"
+        f" hidden_channels={model_config['kwargs'].get('hidden_channels')},"
+        f" n_modes={model_config['kwargs'].get('n_modes')}"
+    )
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_name = f"{args.model}_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
+
+    print('Setting up trainer...')
+    callbacks = []
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=args.checkpoint_dir,
+        filename=f'{run_name}-best',
+        monitor=monitor_metric,
+        mode='min',
+        save_top_k=1,
+        save_last=False,
+    )
+    callbacks.append(checkpoint_callback)
+
+    if args.early_stopping:
+        early_stop_callback = EarlyStopping(
             monitor=monitor_metric,
+            patience=args.patience,
             mode='min',
-            save_top_k=1,
-            save_last=False,
+            verbose=True,
         )
-        callbacks.append(checkpoint_callback)
-        
-        if args.early_stopping:
-            early_stop_callback = EarlyStopping(
-                monitor=monitor_metric,
-                patience=args.patience,
-                mode='min',
-                verbose=True,
-            )
-            callbacks.append(early_stop_callback)
-        
-        # Setup logger (WandB or TensorBoard)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name = f"{args.model}_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
-        
-        if args.use_wandb:
-            api_key = os.environ.get('WANDB_API_KEY')
-            if api_key:
-                os.environ['WANDB_API_KEY'] = api_key
-            else:
-                print("Warning: No WandB API key found in .env file or environment variables.")
-                print("Please set WANDB_API_KEY in your .env file or as an environment variable.")
-                print("Falling back to TensorBoard logging.")
-                args.use_wandb = False
-        
-        if args.use_wandb:
-            logger = WandbLogger(
-                project=args.wandb_project,
-                entity=args.wandb_entity,
-                name=run_name,
-                save_dir=args.log_dir,
-                log_model=True,  
-            )
-            print(f"Using Weights & Biases logging (Project: {args.wandb_project})")
+        callbacks.append(early_stop_callback)
+
+    # Setup logger (WandB or TensorBoard)
+
+    if args.use_wandb:
+        api_key = os.environ.get('WANDB_API_KEY')
+        if api_key:
+            os.environ['WANDB_API_KEY'] = api_key
         else:
-            logger = TensorBoardLogger(
-                save_dir=args.log_dir,
-                name=run_name,
-                default_hp_metric=False,
-            )
-            print("Using TensorBoard logging")
-        
-        # Log hyperparameters
-        logger.log_hyperparams({
-            'model': args.model,
-            'seq_len': args.seq_len,
-            'batch_size': args.batch_size,
-            'spatial_resolution': args.spatial_resolution,
-            'max_epochs': args.max_epochs,
-            'seed': args.seed,
-            **model_config['kwargs'],
-        })
-        
-        trainer = L.Trainer(
-            max_epochs=args.max_epochs,
-            callbacks=callbacks,
-            logger=logger,
-            accelerator='auto',
-            devices='auto',
-            log_every_n_steps=10,
-            enable_progress_bar=True,
+            print("Warning: No WandB API key found in .env file or environment variables.")
+            print("Please set WANDB_API_KEY in your .env file or as an environment variable.")
+            print("Falling back to TensorBoard logging.")
+            args.use_wandb = False
+
+    if args.use_wandb:
+        logger = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            save_dir=args.log_dir,
+            log_model=True,  
         )
-        pbar.update(1)
+        print(f"Using Weights & Biases logging (Project: {args.wandb_project})")
+    else:
+        logger = TensorBoardLogger(
+            save_dir=args.log_dir,
+            name=run_name,
+            default_hp_metric=False,
+        )
+        print("Using TensorBoard logging")
+
+    # Log hyperparameters
+    logger.log_hyperparams({
+        'model': args.model,
+        'seq_len': args.seq_len,
+        'batch_size': args.batch_size,
+        'spatial_resolution': args.spatial_resolution,
+        'max_epochs': args.max_epochs,
+        'seed': args.seed,
+        **model_config['kwargs'],
+    })
+
+    trainer = L.Trainer(
+        max_epochs=args.max_epochs,
+        callbacks=callbacks,
+        logger=logger,
+        accelerator='auto',
+        devices='auto',
+        log_every_n_steps=10,
+        enable_progress_bar=True,
+    )
     
     print(f'\nStarting training ({args.max_epochs} epochs)...\n')
     trainer.fit(model, train_loader, val_loader)
@@ -344,6 +356,10 @@ def _train(args):
         trainer.test(model, test_loader, ckpt_path='best')
     
     if args.run_inference_after_train:
+        if args.use_wandb and not wandb_closed:
+            import wandb
+            wandb.finish()
+            wandb_closed = True
         checkpoint_path = checkpoint_callback.best_model_path or checkpoint_callback.last_model_path
         if checkpoint_path:
             print(f'\nRunning post-training inference with checkpoint: {Path(checkpoint_path).name}\n')
@@ -357,7 +373,7 @@ def _train(args):
 
     print(f'\nTraining complete! Best checkpoint: {checkpoint_callback.best_model_path}\n')
     
-    if args.use_wandb:
+    if args.use_wandb and not wandb_closed:
         import wandb
         wandb.finish()
 
@@ -402,30 +418,98 @@ def _inference(args):
         raise FileNotFoundError(f'Checkpoint not found: {checkpoint_path}')
     
     print(f'\nRunning inference with checkpoint: {checkpoint_path.name}\n')
-    
-    with tqdm(total=3, desc='Setup', unit='step') as pbar:
-        pbar.set_description('Loading data')
-        _, _, test_loader = build_dataloader(
-            seq_len=args.seq_len,
-            batch_size=args.batch_size,
-            seed=args.seed,
-            spatial_resolution=args.spatial_resolution,
+
+    checkpoint_data = load_checkpoint_data(str(checkpoint_path))
+    checkpoint_hparams = checkpoint_data.get('hyper_parameters', {})
+    checkpoint_data_config = checkpoint_hparams.get('data_config')
+
+    if checkpoint_data_config and not args.ignore_checkpoint_data_config:
+        # Override CLI args with stored training configuration to avoid mismatches.
+        for key in ('seq_len', 'spatial_resolution', 'batch_size', 'seed'):
+            value = checkpoint_data_config.get(key)
+            if value is not None:
+                setattr(args, key, value)
+        print(
+            'Using data config from checkpoint '
+            f"(seq_len={args.seq_len}, spatial_resolution={args.spatial_resolution}, "
+            f"batch_size={args.batch_size}, seed={args.seed})"
         )
-        pbar.update(1)
-        
-        pbar.set_description('Loading model')
-        model = load_model_from_checkpoint(str(checkpoint_path), model_name=args.model)
-        pbar.update(1)
-        
-        pbar.set_description('Setting up trainer')
-        trainer = L.Trainer(
-            accelerator='auto',
-            devices='auto',
-            enable_progress_bar=True,
-        )
-        pbar.update(1)
+    elif not checkpoint_data_config:
+        print('Note: checkpoint does not contain data configuration metadata; using CLI values.')
+    else:
+        print('Ignoring checkpoint data configuration per --ignore_checkpoint_data_config flag.')
     
-    print(f'\nRunning predictions...\n')
+    print('Building dataloader...')
+    _, _, test_loader = build_dataloader(
+        seq_len=args.seq_len,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        spatial_resolution=args.spatial_resolution,
+    )
+
+    print('Loading model weights...')
+    model = load_model_from_checkpoint(
+        str(checkpoint_path),
+        model_name=args.model,
+        checkpoint_data=checkpoint_data,
+    )
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_name = f"{args.model}_inference_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
+    logger = None
+
+    if args.use_wandb:
+        api_key = os.environ.get('WANDB_API_KEY')
+        if api_key:
+            os.environ['WANDB_API_KEY'] = api_key
+        else:
+            print("Warning: No WandB API key found for inference logging. Falling back to TensorBoard.")
+            args.use_wandb = False
+
+    if args.use_wandb:
+        logger = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            save_dir=args.log_dir,
+            log_model=False,
+        )
+        print(f"Using Weights & Biases logging for inference (Project: {args.wandb_project})")
+    else:
+        logger = TensorBoardLogger(
+            save_dir=args.log_dir,
+            name=run_name,
+            default_hp_metric=False,
+        )
+        print("Using TensorBoard logging for inference")
+
+    logger.log_hyperparams({
+        'mode': 'inference',
+        'model': args.model,
+        'seq_len': args.seq_len,
+        'batch_size': args.batch_size,
+        'spatial_resolution': args.spatial_resolution,
+        'seed': args.seed,
+        'checkpoint': str(checkpoint_path),
+    })
+
+    trainer = L.Trainer(
+        accelerator='auto',
+        devices='auto',
+        logger=logger,
+        enable_progress_bar=True,
+    )
+
+    if args.use_wandb or args.enable_inference_image_logging:
+        object.__setattr__(model, 'enable_inference_image_logging', True)
+
+    print('\nEvaluating on test set...')
+    test_results = trainer.test(model, dataloaders=test_loader, ckpt_path=None)
+    if test_results:
+        summary = ', '.join(f"{k}={v:.6f}" for k, v in test_results[0].items())
+        print(f"Test metrics: {summary}")
+
+    print('\nRunning predictions...\n')
     predictions = trainer.predict(model, test_loader)
     
     output_dir = Path(args.output_dir)
@@ -434,6 +518,13 @@ def _inference(args):
     
     torch.save(predictions, output_file)
     print(f'\nPredictions saved to: {output_file}\n')
+
+    if args.use_wandb:
+        import wandb
+        artifact = wandb.Artifact(name=f'{run_name}-predictions', type='predictions')
+        artifact.add_file(str(output_file))
+        logger.experiment.log_artifact(artifact)
+        wandb.finish()
 
 
 def main():
