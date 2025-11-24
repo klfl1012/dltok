@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 import lightning as L
-from model import FNOModel
+from model import FNOModel, TFNOModel
 import torch
 
 
@@ -32,6 +32,37 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             'separable': False,
             'factorization': None,
             'rank': 1.0,
+            'fixed_rank_modes': False,
+            'implementation': 'factorized',
+            'decomposition_kwargs': None,
+            'domain_padding': None,
+            'learning_rate': 1e-3,
+            'loss_function': 'MSE',
+            'num_predictions_to_log': 1,
+            'log_images_every_n_epochs': 1,
+            'max_image_logging_epochs': None,
+            'enable_val_image_logging': False,
+            'enable_inference_image_logging': False,
+            'data_config': None,
+        },
+    ),
+    'tfno': ModelSpec(
+        name='TFNO',
+        model_class=TFNOModel,
+        description='Temporal Fourier Neural Operator with neuralop backend for plasma simulation.',
+        default_params={
+            'n_modes': (32, 32, 8),
+            'hidden_channels': 96,
+            'in_channels': 1,
+            'out_channels': 1,
+            'n_layers': 4,
+            'stabilizer': None,
+            'norm': None,
+            'preactivation': False,
+            'fno_skip': 'linear',
+            'separable': False,
+            'factorization': 'tucker',
+            'rank': 0.05,
             'fixed_rank_modes': False,
             'implementation': 'factorized',
             'decomposition_kwargs': None,

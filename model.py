@@ -4,43 +4,12 @@ import torch.nn.functional as F
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from abc import abstractmethod
-from neuralop import FNO
+from neuralop import FNO, TFNO
+from losses import *
 import matplotlib.pyplot as plt
 import numpy as np
 
 # TODO: Inference fn visualisation of more than one consecutive time step samples, so like 5 or more seq len
-
-
-class GradientLoss(nn.Module):
-
-    def __init__(self, loss_type="L2"):
-        super(GradientLoss, self).__init__()
-        self.loss_type = loss_type
-    
-    def forward(self, y_pred, y_true):
-        dx_pred = y_pred[:, :, 1:, :] - y_pred[:, :, :-1, :]
-        dy_pred = y_pred[:, :, :, 1:] - y_pred[:, :, :, :-1]
-
-        dx_true = y_true[:, :, 1:, :] - y_true[:, :, :-1, :]
-        dy_true = y_true[:, :, :, 1:] - y_true[:, :, :, :-1]
-
-        loss = F.mse_loss(dx_pred, dx_true) + F.mse_loss(dy_pred, dy_true)
-
-        return loss
-
-class MSEWithGradientLoss(nn.Module):
-
-    def __init__(self, alpha: float=0.5):
-        super(MSEWithGradientLoss, self).__init__()
-        self.alpha = alpha
-        self.gradient_loss = GradientLoss()
-
-    def forward(self, y_pred, y_true):
-        mse_loss = F.mse_loss(y_pred, y_true)
-        grad_loss = self.gradient_loss(y_pred, y_true)
-        loss = mse_loss + self.alpha * grad_loss
-
-        return loss
 
 
 class BaseModel(L.LightningModule):
@@ -59,10 +28,13 @@ class BaseModel(L.LightningModule):
         
         self.validation_step_outputs = []
         
-        if loss_function == "MSE":
-            self.loss_function = F.mse_loss
+        # Map string names to concrete loss implementations.
+        if loss_function == "MSE" or loss_function == "L2":
+            self.loss_function = Neuralop_LpLoss()
         elif loss_function == "MSE+Grad":
             self.loss_function = MSEWithGradientLoss()
+        elif loss_function == "H1":
+            self.loss_function = Neuralop_H1Loss()
         else:
             raise ValueError(f"Unsupported loss function: {loss_function}")
     
@@ -206,12 +178,27 @@ class BaseModel(L.LightningModule):
             batch_idx = 0  # Always 0 since we store individual samples
             seq_len = y_true.shape[1]
             
-            if y_true.is_cuda:
-                y_true_np = y_true[batch_idx].cpu().numpy()
-                y_pred_np = y_pred[batch_idx].cpu().numpy()
+            sample_true = y_true[batch_idx]
+            sample_pred = y_pred[batch_idx]
+
+            if sample_true.is_cuda:
+                sample_true = sample_true.detach().cpu()
+                sample_pred = sample_pred.detach().cpu()
             else:
-                y_true_np = y_true[batch_idx].numpy()
-                y_pred_np = y_pred[batch_idx].numpy()
+                sample_true = sample_true.detach()
+                sample_pred = sample_pred.detach()
+
+            if sample_true.ndim == 3:
+                y_true_np = sample_true.numpy()
+                y_pred_np = sample_pred.numpy()
+            elif sample_true.ndim == 4:
+                # Multi-channel input; visualize the first channel by default.
+                y_true_np = sample_true[:, 0].numpy()
+                y_pred_np = sample_pred[:, 0].numpy()
+            else:
+                raise ValueError(
+                    f'Unsupported tensor rank {sample_true.ndim} for image logging; expected 3 or 4 dimensions.'
+                )
             
             timesteps_to_show = list(range(seq_len))
             num_timesteps = seq_len
@@ -263,9 +250,6 @@ class BaseModel(L.LightningModule):
         
         except Exception as e:
             print(f"Warning: Could not log images: {e}")
-
-
-
 
 
 class FNOModel(BaseModel):
@@ -373,19 +357,129 @@ class FNOModel(BaseModel):
         """
         Forward pass through FNO.
         
-        Expects input shape: [B, T, X, Y] 
-        Converts to: [B, C=1, X, Y, T] for neuralop FNO
-        Returns: [B, 1, X, Y, T] -> converted back to [B, T, X, Y]
+        Supports inputs shaped either as:
+            - [B, T, X, Y]  (single channel)
+            - [B, T, C, X, Y] (multi-channel)
+        Converts to: [B, C, X, Y, T] for neuralop FNO and reorders back afterward.
         """
-        # Input: [B, T, X, Y]
         if x.ndim == 4:
-            # Permute to [B, X, Y, T] and add channel dimension -> [B, 1, X, Y, T]
+            # [B, T, X, Y] -> [B, 1, X, Y, T]
             x = x.permute(0, 2, 3, 1).unsqueeze(1)
-        
-        # FNO forward pass: [B, 1, X, Y, T] -> [B, 1, X, Y, T]
+            multi_channel = False
+        elif x.ndim == 5:
+            # [B, T, C, X, Y] -> [B, C, X, Y, T]
+            x = x.permute(0, 2, 3, 4, 1)
+            multi_channel = True
+        else:
+            raise ValueError(f'Unsupported input shape {x.shape}; expected rank-4 or rank-5 tensor.')
+
         x = self.fno(x)
+
+        if multi_channel:
+            # [B, C_out, X, Y, T] -> [B, T, C_out, X, Y]
+            x = x.permute(0, 4, 1, 2, 3)
+        else:
+            # [B, C_out=1, X, Y, T] -> [B, T, X, Y]
+            x = x.squeeze(1).permute(0, 3, 1, 2)
         
-        # Convert back: [B, 1, X, Y, T] -> [B, T, X, Y]
-        x = x.squeeze(1).permute(0, 3, 1, 2)
-        
+        return x
+
+
+class TFNOModel(BaseModel):
+    """Temporal Fourier Neural Operator model using neuralop.TFNO.
+
+    Expects inputs shaped [B, T, C, X, Y] and returns the same shape.
+    """
+
+    def __init__(
+        self,
+        n_modes: tuple = (16, 16, 16),
+        hidden_channels: int = 64,
+        in_channels: int = 4,
+        out_channels: int = 4,
+        n_layers: int = 4,
+        non_linearity = F.gelu,
+        stabilizer: str | None = None,
+        norm: str | None = None,
+        preactivation: bool = False,
+        fno_skip: str = 'linear',
+        separable: bool = False,
+        factorization: str | None = None,
+        rank: float = 0.05,
+        fixed_rank_modes: bool = False,
+        implementation: str = 'factorized',
+        decomposition_kwargs: dict | None = None,
+        domain_padding: float | None = None,
+        learning_rate: float = 1e-3,
+        loss_function: str = "MSE",
+        num_predictions_to_log: int = 1,
+        log_images_every_n_epochs: int = 1,
+        max_image_logging_epochs: int | None = None,
+        enable_val_image_logging: bool = False,
+        enable_inference_image_logging: bool = False,
+        data_config: dict | None = None,
+    ):
+        super().__init__(
+            learning_rate=learning_rate,
+            loss_function=loss_function,
+            num_predictions_to_log=num_predictions_to_log,
+            log_images_every_n_epochs=log_images_every_n_epochs,
+            max_image_logging_epochs=max_image_logging_epochs,
+            enable_val_image_logging=enable_val_image_logging,
+            enable_inference_image_logging=enable_inference_image_logging,
+        )
+
+        self.save_hyperparameters()
+        self.data_config = data_config
+
+        tfno_kwargs = {
+            'n_modes': n_modes,
+            'hidden_channels': hidden_channels,
+            'in_channels': in_channels,
+            'out_channels': out_channels,
+            'n_layers': n_layers,
+            'non_linearity': non_linearity,
+            'preactivation': preactivation,
+            'fno_skip': fno_skip,
+            'separable': separable,
+            'rank': rank,
+            'fixed_rank_modes': fixed_rank_modes,
+            'implementation': implementation,
+        }
+
+        if stabilizer is not None:
+            tfno_kwargs['stabilizer'] = stabilizer
+        if norm is not None:
+            tfno_kwargs['norm'] = norm
+        if factorization is not None:
+            tfno_kwargs['factorization'] = factorization
+        if decomposition_kwargs is not None:
+            tfno_kwargs['decomposition_kwargs'] = decomposition_kwargs
+        if domain_padding is not None:
+            tfno_kwargs['domain_padding'] = domain_padding
+
+        self.tfno = TFNO(**tfno_kwargs)
+
+    def forward(self, x):
+        # Same contract as FNOModel
+        if x.ndim == 4:
+            # [B, T, X, Y] -> [B, 1, X, Y, T]
+            x = x.permute(0, 2, 3, 1).unsqueeze(1)
+            multi_channel = False
+        elif x.ndim == 5:
+            # [B, T, C, X, Y] -> [B, C, X, Y, T]
+            x = x.permute(0, 2, 3, 4, 1)
+            multi_channel = True
+        else:
+            raise ValueError(f'Unsupported input shape {x.shape}; expected rank-4 or rank-5 tensor.')
+
+        x = self.tfno(x)
+
+        if multi_channel:
+            # [B, C_out, X, Y, T] -> [B, T, C_out, X, Y]
+            x = x.permute(0, 4, 1, 2, 3)
+        else:
+            # [B, C_out=1, X, Y, T] -> [B, T, X, Y]
+            x = x.squeeze(1).permute(0, 3, 1, 2)
+
         return x

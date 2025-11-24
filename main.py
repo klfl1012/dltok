@@ -11,7 +11,7 @@ import os
 from dotenv import load_dotenv
 from copy import deepcopy
 from itertools import product
-
+import wandb
 from model_registry import (
     build_model,
     available_models,
@@ -21,6 +21,17 @@ from model_registry import (
 from dataloader import build_dataloader
 
 load_dotenv()
+
+
+def _str2bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in {'true', '1', 'yes', 'y'}:
+        return True
+    if value in {'false', '0', 'no', 'n'}:
+        return False
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
 
 
 def _build_args() -> argparse.Namespace:
@@ -73,6 +84,15 @@ def _build_args() -> argparse.Namespace:
         default=256,
         help='Target spatial resolution for downsampling (e.g., 256 to downsample 1024x1024 to 256x256)'
     )
+    parser.add_argument(
+        '--normalize',
+        type=_str2bool,
+        nargs='?',
+        const=True,
+        default=True,
+        metavar='{true,false}',
+        help='Enable or disable channel-wise normalization (pass true/false)'
+    )
     
     # Training parameters
     parser.add_argument(
@@ -114,6 +134,12 @@ def _build_args() -> argparse.Namespace:
         default=None,
         help='Number of FNO layers (FNO only)'
     )
+    parser.add_argument(
+        '--rank',
+        type=float,
+        default=None,
+        help='Low-rank factorization ratio for FNO/TFNO (e.g. 0.05)'
+    )
     
     # Callbacks
     parser.add_argument(
@@ -137,7 +163,7 @@ def _build_args() -> argparse.Namespace:
     parser.add_argument(
         '--checkpoint_dir',
         type=str,
-        default='checkpoints',
+        default=str(Path('/dtu/blackhole/16/223702/ckpts/')),
         help='Directory to save model checkpoints'
     )
     parser.add_argument(
@@ -234,7 +260,11 @@ def _train(args):
         batch_size=args.batch_size,
         seed=args.seed,
         spatial_resolution=args.spatial_resolution,
+        normalize=args.normalize,
     )
+
+    sample_sequence, _ = train_loader.dataset[0]
+    num_channels = sample_sequence.shape[1] if sample_sequence.ndim >= 2 else 1
 
     print('Building model...')
     overrides = {}
@@ -243,6 +273,8 @@ def _train(args):
         'batch_size': args.batch_size,
         'spatial_resolution': args.spatial_resolution,
         'seed': args.seed,
+        'normalize': args.normalize,
+        'num_channels': num_channels,
     }
     if args.learning_rate is not None:
         overrides['learning_rate'] = args.learning_rate
@@ -254,12 +286,16 @@ def _train(args):
         overrides['hidden_channels'] = args.hidden_channels
     if args.n_layers is not None:
         overrides['n_layers'] = args.n_layers
+    if args.rank is not None:
+        overrides['rank'] = args.rank
     if args.num_predictions_to_log is not None:
         overrides['num_predictions_to_log'] = args.num_predictions_to_log
     if args.enable_val_image_logging:
         overrides['enable_val_image_logging'] = True
     if args.enable_inference_image_logging:
         overrides['enable_inference_image_logging'] = True
+    overrides['in_channels'] = num_channels
+    overrides['out_channels'] = num_channels
     overrides['data_config'] = data_config
 
     model, model_config = build_model(args.model, **overrides)
@@ -277,10 +313,13 @@ def _train(args):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"{args.model}_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
 
+    checkpoint_dir = Path(args.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
     print('Setting up trainer...')
     callbacks = []
     checkpoint_callback = ModelCheckpoint(
-        dirpath=args.checkpoint_dir,
+        dirpath=str(checkpoint_dir),
         filename=f'{run_name}-best',
         monitor=monitor_metric,
         mode='min',
@@ -335,6 +374,7 @@ def _train(args):
         'spatial_resolution': args.spatial_resolution,
         'max_epochs': args.max_epochs,
         'seed': args.seed,
+        'normalize': args.normalize,
         **model_config['kwargs'],
     })
 
@@ -374,7 +414,6 @@ def _train(args):
     print(f'\nTraining complete! Best checkpoint: {checkpoint_callback.best_model_path}\n')
     
     if args.use_wandb and not wandb_closed:
-        import wandb
         wandb.finish()
 
 
@@ -429,6 +468,7 @@ def _inference(args):
             value = checkpoint_data_config.get(key)
             if value is not None:
                 setattr(args, key, value)
+            args.normalize = checkpoint_data_config.get('normalize', args.normalize)
         print(
             'Using data config from checkpoint '
             f"(seq_len={args.seq_len}, spatial_resolution={args.spatial_resolution}, "
@@ -445,6 +485,7 @@ def _inference(args):
         batch_size=args.batch_size,
         seed=args.seed,
         spatial_resolution=args.spatial_resolution,
+            normalize=args.normalize,
     )
 
     print('Loading model weights...')
@@ -490,6 +531,7 @@ def _inference(args):
         'batch_size': args.batch_size,
         'spatial_resolution': args.spatial_resolution,
         'seed': args.seed,
+            'normalize': args.normalize,
         'checkpoint': str(checkpoint_path),
     })
 
