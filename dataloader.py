@@ -23,6 +23,8 @@ class DataLoaderConfig:
     shuffle: bool = False
     data_root: Path = DEFAULT_DATA_ROOTS['data']
     spatial_resolution: Optional[int] = 256  # Target resolution (default: downsample 1024->256)
+    channels: Tuple[str, ...] = ('n', 'pe', 'pi', 'te', 'ti')
+    normalize: bool = True
 
 
 def _tensor_to_sequences(
@@ -48,16 +50,16 @@ class PlasmaDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.data[idx]  # [T, X, Y]
-        y = self.targets[idx]  # [T, X, Y]
+        x = self.data[idx]  # [T, C, X, Y]
+        y = self.targets[idx]  # [T, C, X, Y]
         
         # Downsample if spatial_resolution is specified
         if self.spatial_resolution is not None:
-            T, X, Y = x.shape
+            T, C, X, Y = x.shape
             if X != self.spatial_resolution or Y != self.spatial_resolution:
-                # Reshape to [T, 1, X, Y] for interpolation
-                x = x.unsqueeze(1)
-                y = y.unsqueeze(1)
+                # Merge time and channel dims for interpolation then reshape back
+                x = x.reshape(T * C, 1, X, Y)
+                y = y.reshape(T * C, 1, X, Y)
                 
                 # Downsample using bilinear interpolation
                 x = F.interpolate(x, size=(self.spatial_resolution, self.spatial_resolution), 
@@ -65,9 +67,9 @@ class PlasmaDataset(Dataset):
                 y = F.interpolate(y, size=(self.spatial_resolution, self.spatial_resolution), 
                                  mode='bilinear', align_corners=False)
                 
-                # Reshape back to [T, X, Y]
-                x = x.squeeze(1)
-                y = y.squeeze(1)
+                # Reshape back to [T, C, X, Y]
+                x = x.reshape(T, C, self.spatial_resolution, self.spatial_resolution)
+                y = y.reshape(T, C, self.spatial_resolution, self.spatial_resolution)
         
         return x, y
 
@@ -84,6 +86,8 @@ def build_dataloader(
     shuffle: bool = DataLoaderConfig.shuffle,
     data_root: Path = DataLoaderConfig.data_root,
     spatial_resolution: Optional[int] = DataLoaderConfig.spatial_resolution,
+    channels: Tuple[str, ...] = DataLoaderConfig.channels,
+    normalize: bool = DataLoaderConfig.normalize,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     assert abs(train_split + val_split + test_split - 1.0) == 0, \
@@ -92,8 +96,14 @@ def build_dataloader(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    data = collect('n', path = str(data_root))
-    data_flattened = torch.from_numpy(data.squeeze()).float()
+    data = [collect(var, path = str(data_root)) for var in channels]
+    data_flattened = torch.from_numpy(np.stack([arr.squeeze() for arr in data], axis=1)).float()
+
+    if normalize:
+        reduce_dims = (0, 2, 3)
+        mean = data_flattened.mean(dim=reduce_dims, keepdim=True)
+        std = data_flattened.std(dim=reduce_dims, keepdim=True).clamp_min(1e-6)
+        data_flattened = (data_flattened - mean) / std
 
     X_seq, y_seq = _tensor_to_sequences(data_flattened, seq_len)
     
@@ -117,6 +127,10 @@ def build_dataloader(
         for X, y in splits
     ]
     
-    print(f"Data loaded: Original size, target resolution: {spatial_resolution if spatial_resolution else 'original'}")
+    print(
+        "Data loaded: Original size, target resolution:"
+        f" {spatial_resolution if spatial_resolution else 'original'}"
+        f", normalization={'on' if normalize else 'off'}"
+    )
     
     return train_loader, val_loader, test_loader
