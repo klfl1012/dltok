@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 import numpy as np
 from boutdata import collect
 import torch.nn.functional as F
@@ -25,7 +25,6 @@ class DataLoaderConfig:
     spatial_resolution: Optional[int] = 256  # Target resolution (default: downsample 1024->256)
     channels: Tuple[str, ...] = ('n', 'pe', 'pi', 'te', 'ti')
     normalize: bool = True
-
 
 def _tensor_to_sequences(
         data_tensor: torch.Tensor, 
@@ -73,6 +72,61 @@ class PlasmaDataset(Dataset):
         
         return x, y
 
+class DiffusionDataset(Dataset):
+    def __init__(self, data: List[torch.Tensor], targets: List[torch.Tensor], 
+                 spatial_resolution: Optional[int] = None,  noise_mean: float = 0.0, noise_std: Union[float, Tuple[float, float]] = 0.02, 
+                 ):
+        """
+        data: List of tensors representing the clean images.
+        targets: List of tensors representing the target images (clean images).
+        spatial_resolution: Target spatial resolution after cropping and resizing.
+
+        noise_mean: Mean for Gaussian noise to be added.
+        noise_std: Standard deviation for Gaussian noise to be added; Can be a float or a tuple (min, max) for random std.
+        """
+
+        self.data = data
+        self.targets = targets
+        self.spatial_resolution = spatial_resolution
+
+        self.noise_mean = noise_mean
+        self.noise_std = noise_std
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self.data[idx]  # [T, C, X, Y]
+        y = self.targets[idx]  # [T, C, X, Y]
+
+        # 1. Resize images
+        if self.spatial_resolution is not None:
+            # 1.1 Merge time and channel dims for interpolation then reshape back
+            T, C, X, Y = x.shape
+            x = x.reshape(T * C, 1, X, Y)
+            y = y.reshape(T * C, 1, X, Y)
+
+            # 1.2. Resize images
+            x = F.interpolate(x, size=(self.spatial_resolution, self.spatial_resolution), 
+                                mode='bilinear', align_corners=False)
+            y = F.interpolate(y, size=(self.spatial_resolution, self.spatial_resolution), 
+                                mode='bilinear', align_corners=False)
+
+            # 1.3 Reshape back
+            x = x.reshape(T, C, self.spatial_resolution, self.spatial_resolution)
+            y = y.reshape(T, C, self.spatial_resolution, self.spatial_resolution)
+
+        # 2 Add Gaussian noise to the resized images
+        # 2.1 Get the std for noise
+        if isinstance(self.noise_std, tuple):
+            noise_std = np.random.uniform(self.noise_std[0], self.noise_std[1])            
+        else:
+            noise_std = self.noise_std
+
+        noise = torch.normal(mean=self.noise_mean, std=noise_std, size=x.shape)
+        x_noisy = x + noise
+
+        return x_noisy, y
 
 def build_dataloader(
     seq_len: int,
@@ -88,8 +142,12 @@ def build_dataloader(
     spatial_resolution: Optional[int] = DataLoaderConfig.spatial_resolution,
     channels: Tuple[str, ...] = DataLoaderConfig.channels,
     normalize: bool = DataLoaderConfig.normalize,
+    dataloader: str = 'PlasmaDataset',
+    noise_mean: float = 0.0,
+    noise_std: Union[float, Tuple[float, float]] = 0.02,
+    
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-
+    
     assert abs(train_split + val_split + test_split - 1.0) == 0, \
         f'Train, Val, Test splits must sum to 1.0 but are {train_split + val_split + test_split}'
     
@@ -116,17 +174,30 @@ def build_dataloader(
     X_test, y_test = X_seq[val_end:], y_seq[val_end:]
 
     splits = [(X_train, y_train), (X_val, y_val), (X_test, y_test)]
-    train_loader, val_loader, test_loader = [
-        DataLoader(
-            PlasmaDataset(X, y, spatial_resolution=spatial_resolution),
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-        for X, y in splits
-    ]
-    
+
+    if dataloader == 'PlasmaDataset':
+        train_loader, val_loader, test_loader = [
+            DataLoader(
+                PlasmaDataset(X, y, spatial_resolution=spatial_resolution),
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+            )
+            for X, y in splits
+        ]
+    else:
+        train_loader, val_loader, test_loader = [
+            DataLoader(
+                DiffusionDataset(X, X, spatial_resolution=spatial_resolution, noise_mean = noise_mean ,noise_std = noise_std),
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                pin_memory=pin_memory
+            )
+            for X, y in splits
+        ]
+     
     print(
         "Data loaded: Original size, target resolution:"
         f" {spatial_resolution if spatial_resolution else 'original'}"
