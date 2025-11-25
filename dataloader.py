@@ -23,7 +23,7 @@ class DataLoaderConfig:
     shuffle: bool = False
     data_root: Path = DEFAULT_DATA_ROOTS['data']
     spatial_resolution: Optional[int] = 256  # Target resolution (default: downsample 1024->256)
-    channels: Tuple[str, ...] = ('n', 'pe', 'pi', 'te', 'ti')
+    channels: Tuple[str, ...] = ('n', 'phi') # ('n', 'pe', 'pi', 'te', 'ti')
     normalize: bool = True
 
 def _tensor_to_sequences(
@@ -49,27 +49,39 @@ class PlasmaDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.data[idx]  # [T, C, X, Y]
-        y = self.targets[idx]  # [T, C, X, Y]
-        
+        x = self.data[idx]   # [T, C, X, Y] or [T, X, Y]
+        y = self.targets[idx]
+
+        # Ensure we always have a channel dimension: [T, C, X, Y]
+        if x.ndim == 3:
+            x = x.unsqueeze(1)  # [T, 1, X, Y]
+            y = y.unsqueeze(1)
+
         # Downsample if spatial_resolution is specified
         if self.spatial_resolution is not None:
             T, C, X, Y = x.shape
             if X != self.spatial_resolution or Y != self.spatial_resolution:
-                # Merge time and channel dims for interpolation then reshape back
-                x = x.reshape(T * C, 1, X, Y)
-                y = y.reshape(T * C, 1, X, Y)
-                
-                # Downsample using bilinear interpolation
-                x = F.interpolate(x, size=(self.spatial_resolution, self.spatial_resolution), 
-                                 mode='bilinear', align_corners=False)
-                y = F.interpolate(y, size=(self.spatial_resolution, self.spatial_resolution), 
-                                 mode='bilinear', align_corners=False)
-                
-                # Reshape back to [T, C, X, Y]
-                x = x.reshape(T, C, self.spatial_resolution, self.spatial_resolution)
-                y = y.reshape(T, C, self.spatial_resolution, self.spatial_resolution)
-        
+                # [T, C, X, Y] -> [T*C, 1, X, Y] for interpolation
+                x = x.view(T * C, 1, X, Y)
+                y = y.view(T * C, 1, X, Y)
+
+                x = F.interpolate(
+                    x,
+                    size=(self.spatial_resolution, self.spatial_resolution),
+                    mode='bilinear',
+                    align_corners=False,
+                )
+                y = F.interpolate(
+                    y,
+                    size=(self.spatial_resolution, self.spatial_resolution),
+                    mode='bilinear',
+                    align_corners=False,
+                )
+
+                # Back to [T, C, X, Y]
+                x = x.view(T, C, self.spatial_resolution, self.spatial_resolution)
+                y = y.view(T, C, self.spatial_resolution, self.spatial_resolution)
+
         return x, y
 
 class DiffusionDataset(Dataset):

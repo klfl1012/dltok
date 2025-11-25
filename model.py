@@ -9,8 +9,6 @@ from losses import *
 import matplotlib.pyplot as plt
 import numpy as np
 
-# TODO: Inference fn visualisation of more than one consecutive time step samples, so like 5 or more seq len
-
 
 class BaseModel(L.LightningModule):
     """Base class for all models with shared training/validation/test logic."""
@@ -29,7 +27,7 @@ class BaseModel(L.LightningModule):
         self.validation_step_outputs = []
         
         # Map string names to concrete loss implementations.
-        if loss_function == "MSE" or loss_function == "L2":
+        if loss_function in ("MSE", "L2", "LpLoss"):
             self.loss_function = Neuralop_LpLoss()
         elif loss_function == "MSE+Grad":
             self.loss_function = MSEWithGradientLoss()
@@ -44,6 +42,7 @@ class BaseModel(L.LightningModule):
     
     def training_step(self, batch, batch_idx):
         x, y = batch 
+        x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
         train_loss = self.loss_function(y_hat, y)
         
@@ -63,6 +62,7 @@ class BaseModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
         val_loss = self.loss_function(y_hat, y)
         
@@ -90,6 +90,7 @@ class BaseModel(L.LightningModule):
     
     def test_step(self, batch, batch_idx):
         x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
         test_loss = self.loss_function(y_hat, y)
         
@@ -107,6 +108,7 @@ class BaseModel(L.LightningModule):
     
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
 
         # Optional image logging during inference

@@ -111,7 +111,7 @@ def _build_args() -> argparse.Namespace:
         '--loss_function',
         type=str,
         default=None,
-        choices=['MSE', 'MSE+Grad'],
+        choices=['MSE', 'L2', 'MSE+Grad', 'H1', 'LpLoss'],
         help='Loss function (overrides model default)'
     )
     
@@ -133,12 +133,6 @@ def _build_args() -> argparse.Namespace:
         type=int,
         default=None,
         help='Number of FNO layers (FNO only)'
-    )
-    parser.add_argument(
-        '--rank',
-        type=float,
-        default=None,
-        help='Low-rank factorization ratio for FNO/TFNO (e.g. 0.05)'
     )
     
     # Callbacks
@@ -286,8 +280,6 @@ def _train(args):
         overrides['hidden_channels'] = args.hidden_channels
     if args.n_layers is not None:
         overrides['n_layers'] = args.n_layers
-    if args.rank is not None:
-        overrides['rank'] = args.rank
     if args.num_predictions_to_log is not None:
         overrides['num_predictions_to_log'] = args.num_predictions_to_log
     if args.enable_val_image_logging:
