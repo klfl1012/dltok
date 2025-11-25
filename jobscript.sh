@@ -3,11 +3,12 @@
 ### –- specify queue --
 #BSUB -q gpuv100
 ### -- set the job Name --
-#BSUB -J testjob
+#BSUB -J dl_job_32gb
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 4
 ### -- Select the resources: 1 gpu in exclusive process mode --
 #BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -R "select[gpu32gb]"
 ### -- set walltime limit: hh:mm --  maximum 24 hours for GPU-queues right now
 #BSUB -W 1:00
 # request 5GB of system-memory
@@ -26,8 +27,7 @@
 #BSUB -e gpu_%J.err
 # -- end of LSF options --
 
-# Load the cuda module
-cd /dtu/blackhole/1b/191611
-source DL/bin/activate
+source /dtu/blackhole/1b/191611/DL/DL/bin/activate
 cd /dtu/blackhole/1b/191611/Data
-python3 test_run.py
+
+python main.py --mode train     --max_epochs 5     --batch_size 8     --seq_len 4  --spatial_resolution 512     --hidden_channels 16     --n_modes "4,4,4"  --patience 3     --num_predictions_to_log 1 --use_wandb
