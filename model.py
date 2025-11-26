@@ -8,7 +8,12 @@ from neuralop import FNO, TFNO
 from losses import *
 import matplotlib.pyplot as plt
 import numpy as np
+from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer # pip install denoising_diffusion_pytorch
+from denoising_diffusion_pytorch.version import __version__
+from tqdm.auto import tqdm
 
+def divisible_by(numer, denom):
+    return (numer % denom) == 0
 
 class BaseModel(L.LightningModule):
     """Base class for all models with shared training/validation/test logic."""
@@ -485,3 +490,387 @@ class TFNOModel(BaseModel):
             x = x.squeeze(1).permute(0, 3, 1, 2)
 
         return x
+
+
+class DiffusionModel(BaseModel):
+    def __init__(
+        self,
+
+        # UNet configurations
+        dim,                                # Number of filters in the first layer. Used to initialize init_dim if init_dim is None
+        init_dim = None,                    # The number of output channels for the initial convolution layer
+        out_dim = None,                     # No of output channels
+        dim_mults = (1, 2, 4, 8),           # Multipliers for the number of channels in each layer
+        channels = 2,                       # Number of input channels
+        self_condition = False,             # self-conditioning allows the model to use its own previous output as input alongside the current input during training
+        learned_variance = False, 
+        learned_sinusoidal_cond = False,
+        random_fourier_features = False,    # Enables the use of random Fourier features for positioning in the latent space
+        learned_sinusoidal_dim = 16, 
+        sinusoidal_pos_emb_theta = 10000,
+        dropout = 0.,
+        attn_dim_head = 32,                 # Attention head dimensionality
+        attn_heads = 4,                     # No. of attention heads
+        flash_attn = False,   
+
+        # GaussianDiffusion configurations
+        image_size = 512,                   # Input image size
+        timesteps = 1000,                   # No. of diffusion steps
+        sampling_timesteps = None,          # The number of time steps to use during sampling.  Less than timesteps allows quicker generation
+        objective = 'pred_noise',           # The training objective of the diffusion model.
+        auto_normalize = True,              # Whether the input data should be automatically normalized
+        min_snr_loss_weight = False,        # Whether to apply a minimum signal-to-noise ratio (SNR) weighting strategy to the loss function
+        min_snr_gamma = 5,                  # Used in conjunction with min_snr_loss_weight to clamp the SNR values during training
+        immiscible = False,
+
+        # Training configurations
+        learning_rate = 1e-3,
+        loss_function = "MSE",
+        num_predictions_to_log = 1,
+        log_images_every_n_epochs = 1,
+        max_image_logging_epochs = None,
+        enable_val_image_logging = False,
+        enable_inference_image_logging = False,
+    ):
+        """
+        Initialize Diffusion model with neuralop backend.
+        """
+        super().__init__(
+            learning_rate=learning_rate,
+            loss_function=loss_function,
+            num_predictions_to_log=num_predictions_to_log,
+            log_images_every_n_epochs=log_images_every_n_epochs,
+            max_image_logging_epochs=max_image_logging_epochs,
+            enable_val_image_logging=enable_val_image_logging,
+            enable_inference_image_logging=enable_inference_image_logging,
+        )
+        
+        self.save_hyperparameters()
+        
+        self.Unet = Unet(
+            dim=dim,
+            init_dim=init_dim,
+            out_dim=out_dim,
+            dim_mults=dim_mults,
+            channels=channels,
+            self_condition=self_condition,
+            learned_variance=learned_variance,
+            learned_sinusoidal_cond=learned_sinusoidal_cond,
+            random_fourier_features=random_fourier_features,
+            learned_sinusoidal_dim=learned_sinusoidal_dim,
+            sinusoidal_pos_emb_theta=sinusoidal_pos_emb_theta,
+            dropout=dropout,
+            attn_dim_head=attn_dim_head,
+            attn_heads=attn_heads,
+            flash_attn=flash_attn,
+        )
+
+        self.diffusion = GaussianDiffusion(
+            model=self.Unet,
+            image_size=image_size,
+            timesteps=timesteps,
+            sampling_timesteps=sampling_timesteps,
+            objective=objective,
+            auto_normalize=auto_normalize,
+            min_snr_loss_weight=min_snr_loss_weight,
+            min_snr_gamma=min_snr_gamma,
+            immiscible=immiscible,
+        )
+
+        self.loss_function = nn.MSELoss()
+
+    def forward(self, x):
+        """
+        Forward pass through the denoising diffusion model.
+        
+        Supports inputs shaped as:
+            - [B, C, X, Y]  (single channel)
+        """
+        x = self.diffusion(x)
+        print(x.shape)
+        return x
+
+    @torch.inference_mode()
+    def infer(self, noisy_images):
+        """
+        Perform inference (denoising) given noisy images.
+        
+        Args:
+            noisy_images (Tensor): The input tensor of noisy images with shape [B, C, X, Y].
+        
+        Returns:
+            Tensor: Denoised images.
+        """
+        # Ensure the input is on the correct device
+        noisy_images = noisy_images.to(self.device)
+
+        # Call the p_sample_loop to denoise the images
+        denoised_images = self.diffusion.p_sample_loop(noisy_images.shape, return_all_timesteps=False)
+
+        return denoised_images
+    
+    def training_step(self, batch, batch_idx):
+        x, y = batch 
+        x, y = x.to(self.device), y.to(self.device)
+        y_hat = self(x)
+        train_loss = self.loss_function(y_hat, y)
+        
+        log_dict = {
+            f"train_{self.loss_name}_loss": train_loss,
+            "learning_rate": self.learning_rate
+        }
+        self.log_dict(
+            log_dict, 
+            prog_bar=True, 
+            on_step=True, 
+            on_epoch=True,
+            logger=True  
+        )
+        
+        return train_loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
+        y_hat = self(x)
+        val_loss = self.loss_function(y_hat, y)
+        
+        self.log(
+            f"val_{self.loss_name}_loss", 
+            val_loss, 
+            prog_bar=True, 
+            on_step=False, 
+            on_epoch=True,
+            logger=True
+        )
+        
+        # Store outputs from first batch for end-of-epoch image logging
+        # if self.enable_val_image_logging and batch_idx == 0:
+        #     # Store up to num_predictions_to_log samples
+        #     num_samples = min(self.num_predictions_to_log, x.shape[0])
+        #     for i in range(num_samples):
+        #         self.validation_step_outputs.append({
+        #             'x': x[i:i+1].detach().cpu(),
+        #             'y_true': y[i:i+1].detach().cpu(),
+        #             'y_pred': y_hat[i:i+1].detach().cpu()
+        #         })
+        
+        return val_loss
+    
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
+        y_hat = self(x)
+        test_loss = self.loss_function(y_hat, y)
+        
+        # Log metrics
+        self.log(
+            f"test_{self.loss_name}_loss", 
+            test_loss, 
+            prog_bar=True, 
+            on_step=False, 
+            on_epoch=True,
+            logger=True
+        )
+        
+        return test_loss
+    
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
+        y_hat = self(x)
+
+        # Optional image logging during inference
+        # if self.enable_inference_image_logging and batch_idx == 0 and self.logger is not None:
+        #     # Log up to num_predictions_to_log samples from the first batch
+        #     num_samples = min(self.num_predictions_to_log, x.shape[0])
+        #     for i in range(num_samples):
+        #         self._log_predictions_as_images(
+        #             x[i:i+1].detach().cpu(),
+        #             y[i:i+1].detach().cpu(),
+        #             y_hat[i:i+1].detach().cpu(),
+        #             prefix='inference',
+        #             sample_idx=i,
+        #         )
+
+        return y_hat, y
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        return optimizer
+    
+    def on_train_epoch_end(self):
+        self.log("epoch", float(self.current_epoch), logger=True)
+    
+    def on_validation_epoch_end(self):
+        """Log images only on selected epochs to avoid flooding logs."""
+        if not self.enable_val_image_logging:
+            self.validation_step_outputs.clear()
+            return
+
+        should_log = False
+
+        if self.max_image_logging_epochs is not None:
+            if self._image_logging_epochs < self.max_image_logging_epochs:
+                should_log = True
+        else:
+            should_log = True
+
+        if should_log:
+            if (int(self.current_epoch) % self.log_images_every_n_epochs) != 0:
+                should_log = False
+
+        if should_log and len(self.validation_step_outputs) > 0 and self.logger is not None:
+            for idx, outputs in enumerate(self.validation_step_outputs):
+                x = outputs['x']
+                y_true = outputs['y_true']
+                y_pred = outputs['y_pred']
+
+                self._log_predictions_as_images(x, y_true, y_pred, prefix='val', sample_idx=idx)
+
+            self._image_logging_epochs += 1
+        
+        # Clear stored outputs for next epoch
+        self.validation_step_outputs.clear()
+    
+    def _log_predictions_as_images(self, x, y_true, y_pred, prefix='val', sample_idx=0):
+        """
+        Log predictions as images to TensorBoard or WandB.
+        Each prediction consists of multiple timestep images (the full sequence length).
+        
+        Args:
+            x: Input tensor [B, T, X, Y] where B=1 (single sample)
+            y_true: Ground truth [B, T, X, Y]
+            y_pred: Predictions [B, T, X, Y]
+            prefix: Prefix for logging ('val' or 'test')
+            sample_idx: Index of the sample being logged (for multiple predictions per epoch)
+        """
+        try:
+            batch_idx = 0  # Always 0 since we store individual samples
+            seq_len = y_true.shape[1]
+            
+            sample_true = y_true[batch_idx]
+            sample_pred = y_pred[batch_idx]
+
+            if sample_true.is_cuda:
+                sample_true = sample_true.detach().cpu()
+                sample_pred = sample_pred.detach().cpu()
+            else:
+                sample_true = sample_true.detach()
+                sample_pred = sample_pred.detach()
+
+            if sample_true.ndim == 3:
+                y_true_np = sample_true.numpy()
+                y_pred_np = sample_pred.numpy()
+            elif sample_true.ndim == 4:
+                # Multi-channel input; visualize the first channel by default.
+                y_true_np = sample_true[:, 0].numpy()
+                y_pred_np = sample_pred[:, 0].numpy()
+            else:
+                raise ValueError(
+                    f'Unsupported tensor rank {sample_true.ndim} for image logging; expected 3 or 4 dimensions.'
+                )
+            
+            timesteps_to_show = list(range(seq_len))
+            num_timesteps = seq_len
+            
+            fig, axes = plt.subplots(3, num_timesteps, figsize=(4 * num_timesteps, 12))
+            
+            if num_timesteps == 1:
+                axes = axes.reshape(-1, 1)
+            
+            for col_idx, t in enumerate(timesteps_to_show):
+                true_frame = y_true_np[t]
+                pred_frame = y_pred_np[t]
+                error_frame = np.abs(true_frame - pred_frame)
+                
+                im0 = axes[0, col_idx].imshow(true_frame, cmap='viridis', aspect='auto')
+                axes[0, col_idx].set_title(f'Ground Truth (t={t})')
+                axes[0, col_idx].axis('off')
+                plt.colorbar(im0, ax=axes[0, col_idx], fraction=0.046)
+                
+                im1 = axes[1, col_idx].imshow(pred_frame, cmap='viridis', aspect='auto')
+                axes[1, col_idx].set_title(f'Prediction (t={t})')
+                axes[1, col_idx].axis('off')
+                plt.colorbar(im1, ax=axes[1, col_idx], fraction=0.046)
+                
+                im2 = axes[2, col_idx].imshow(error_frame, cmap='hot', aspect='auto')
+                axes[2, col_idx].set_title(f'Abs Error (t={t})')
+                axes[2, col_idx].axis('off')
+                plt.colorbar(im2, ax=axes[2, col_idx], fraction=0.046)
+            
+            plt.tight_layout()
+            
+            # Use sample_idx in key name for multiple predictions
+            key_suffix = f'_sample_{sample_idx}' if self.num_predictions_to_log > 1 else ''
+            
+            if isinstance(self.logger, TensorBoardLogger) and hasattr(self.logger, 'experiment'):
+                self.logger.experiment.add_figure(
+                    f'{prefix}/predictions_sequence{key_suffix}',
+                    fig,
+                    global_step=self.current_epoch
+                )
+            elif isinstance(self.logger, WandbLogger):
+                self.logger.log_image(
+                    key=f'{prefix}/predictions_sequence{key_suffix}',
+                    images=[fig],
+                    step=self.current_epoch
+                )
+            
+            plt.close(fig)
+        
+        except Exception as e:
+            print(f"Warning: Could not log images: {e}")
+
+# Credits: Trainer class from https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
+# class DiffusionTrainer(Trainer):
+#     def __init__(self, data_loader, **kwargs):
+#         super().__init__(folder='', **kwargs)
+        
+#         # Store the provided DataLoader
+#         self.data_loader = data_loader
+
+#     def train(self):
+#         accelerator = self.accelerator
+#         device = accelerator.device
+
+#         with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
+#             while self.step < self.train_num_steps:
+#                 self.model.train()
+#                 total_loss = 0.0
+
+#                 for _ in range(self.gradient_accumulate_every):
+#                     # Get a batch of noisy and clean images directly from the DataLoader
+#                     noisy_images, clean_images = next(self.data_loader).to(device)
+
+#                     # Compute the actual noise
+#                     actual_noise = clean_images - noisy_images
+
+#                     with self.accelerator.autocast():
+#                         # Predict the noise from the noisy images
+#                         predicted_noise = self.model(noisy_images)
+
+#                         # Compute the loss (MSE between predicted noise and actual noise)
+#                         loss = torch.nn.functional.mse_loss(predicted_noise, actual_noise)
+#                         loss = loss / self.gradient_accumulate_every
+#                         total_loss += loss.item()
+
+#                     # Backpropagation
+#                     self.accelerator.backward(loss)
+
+#                 pbar.set_description(f'loss: {total_loss:.4f}')
+#                 accelerator.wait_for_everyone()
+#                 accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
+#                 self.opt.step()
+#                 self.opt.zero_grad()
+#                 accelerator.wait_for_everyone()
+
+#                 self.step += 1
+#                 if accelerator.is_main_process:
+#                     self.ema.update()
+#                     if self.step != 0 and divisible_by(self.step, self.save_and_sample_every):
+#                         self._sample_and_log_images()
+#                 pbar.update(1)
+
+#         accelerator.print('training complete')

@@ -124,18 +124,7 @@ def _build_args() -> argparse.Namespace:
         default=True,
         help='Whether to use random cropping in DiffusionDataset'
     )
-    parser.add_argument(
-        '--diffusion_dataset_min_crop',
-        type=int,
-        default=32,
-        help='Size of the minimum random crop in DiffusionDataset'
-    )
-    parser.add_argument(
-        '--diffusion_dataset_max_crop',
-        type=int,
-        default=None,
-        help='Size of the maximum random crop in DiffusionDataset'
-    )
+
     parser.add_argument(
         '--use_wandb',
         action='store_true',
@@ -173,6 +162,30 @@ def _build_args() -> argparse.Namespace:
         help='Loss function (overrides model default)'
     )
     
+    # Model hyperparms for diffusion model
+    parser.add_argument('--diffusion_dim', type=int, default=64, help='Base dimension of UNet layers')
+    parser.add_argument('--diffusion_init_dim', type=int, default=None, help='Initial dimension (optional)')
+    parser.add_argument('--diffusion_out_dim', type=int, default=None, help='Output dimension (optional)')
+    parser.add_argument('--diffusion_dim_mults', type=str, default="1,2,4,8", help='Comma-separated multipliers for UNet layers')
+    parser.add_argument('--diffusion_channels', type=int, default=2, help='Number of input channels')
+    parser.add_argument('--diffusion_self_condition', action='store_true', help='Enable self-conditioning')
+    parser.add_argument('--diffusion_learned_variance', action='store_true', help='Enable learned variance')
+    parser.add_argument('--diffusion_learned_sinusoidal_cond', action='store_true', help='Enable learned sinusoidal conditioning')
+    parser.add_argument('--diffusion_random_fourier_features', action='store_true', help='Enable random Fourier features')
+    parser.add_argument('--diffusion_learned_sinusoidal_dim', type=int, default=16, help='Dimension for learned sinusoidal embedding')
+    parser.add_argument('--diffusion_sinusoidal_pos_emb_theta', type=int, default=10000, help='Theta for sinusoidal positional embedding')
+    parser.add_argument('--diffusion_dropout', type=float, default=0.0, help='Dropout rate')
+    parser.add_argument('--diffusion_attn_dim_head', type=int, default=32, help='Attention head dimension')
+    parser.add_argument('--diffusion_attn_heads', type=int, default=4, help='Number of attention heads')
+    parser.add_argument('--diffusion_flash_attn', action='store_true', help='Enable flash attention')
+    parser.add_argument('--diffusion_timesteps', type=int, default=1000, help='Number of diffusion timesteps')
+    parser.add_argument('--diffusion_sampling_timesteps', type=int, default=None, help='Number of sampling timesteps (optional)')
+    parser.add_argument('--diffusion_objective', type=str, default='pred_noise', help='Diffusion objective')
+    parser.add_argument('--diffusion_auto_normalize', action='store_true', help='Enable auto normalization')
+    parser.add_argument('--diffusion_min_snr_loss_weight', action='store_true', help='Enable min SNR loss weighting')
+    parser.add_argument('--diffusion_min_snr_gamma', type=int, default=5, help='Gamma for min SNR loss weighting')
+    parser.add_argument('--diffusion_immiscible', action='store_true', help='Enable immiscible option')
+
     # Model hyperparameters (optional overrides)
     parser.add_argument(
         '--n_modes',
@@ -221,8 +234,8 @@ def _build_args() -> argparse.Namespace:
     parser.add_argument(
         '--checkpoint_dir',
         type=str,
-        default=str(Path('/dtu/blackhole/16/223702/ckpts/')),
-        # default=str(Path('/dtu/blackhole/1b/191611/DL/ckpts/')),
+        # default=str(Path('/dtu/blackhole/16/223702/ckpts/')),
+        default=str(Path('/dtu/blackhole/1b/191611/DL/ckpts/')),
         help='Directory to save model checkpoints'
     )
     parser.add_argument(
@@ -322,48 +335,125 @@ def _train(args):
     num_channels = sample_sequence.shape[1] if sample_sequence.ndim >= 2 else 1
 
     print('Building model...')
-    overrides = {}
-    data_config = {
-        'seq_len': args.seq_len,
-        'batch_size': args.batch_size,
-        'spatial_resolution': args.spatial_resolution,
-        'seed': args.seed,
-        'normalize': args.normalize,
-        'num_channels': num_channels,
-    }
-    if args.learning_rate is not None:
-        overrides['learning_rate'] = args.learning_rate
-    if args.loss_function is not None:
-        overrides['loss_function'] = args.loss_function
-    if args.n_modes is not None:
-        overrides['n_modes'] = tuple(map(int, args.n_modes.split(',')))
-    if args.hidden_channels is not None:
-        overrides['hidden_channels'] = args.hidden_channels
-    if args.n_layers is not None:
-        overrides['n_layers'] = args.n_layers
-    if args.rank is not None:
-        overrides['rank'] = args.rank
-    if args.num_predictions_to_log is not None:
-        overrides['num_predictions_to_log'] = args.num_predictions_to_log
-    if args.enable_val_image_logging:
-        overrides['enable_val_image_logging'] = True
-    if args.enable_inference_image_logging:
-        overrides['enable_inference_image_logging'] = True
-    overrides['in_channels'] = num_channels
-    overrides['out_channels'] = num_channels
-    overrides['data_config'] = data_config
+    if (args.model != 'diffusion'):
+        # FNO / TFNO model setup
+        overrides = {}
+        data_config = {
+            'seq_len': args.seq_len,
+            'batch_size': args.batch_size,
+            'spatial_resolution': args.spatial_resolution,
+            'seed': args.seed,
+            'normalize': args.normalize,
+            'num_channels': num_channels,
+        }
+        if args.learning_rate is not None:
+            overrides['learning_rate'] = args.learning_rate
+        if args.loss_function is not None:
+            overrides['loss_function'] = args.loss_function
+        if args.n_modes is not None:
+            overrides['n_modes'] = tuple(map(int, args.n_modes.split(',')))
+        if args.hidden_channels is not None:
+            overrides['hidden_channels'] = args.hidden_channels
+        if args.n_layers is not None:
+            overrides['n_layers'] = args.n_layers
+        if args.rank is not None:
+            overrides['rank'] = args.rank
+        if args.num_predictions_to_log is not None:
+            overrides['num_predictions_to_log'] = args.num_predictions_to_log
+        if args.enable_val_image_logging:
+            overrides['enable_val_image_logging'] = True
+        if args.enable_inference_image_logging:
+            overrides['enable_inference_image_logging'] = True
+        overrides['in_channels'] = num_channels
+        overrides['out_channels'] = num_channels
+        overrides['data_config'] = data_config
 
-    model, model_config = build_model(args.model, **overrides)
-    monitor_metric = f"val_{model.loss_name}_loss"
+        model, model_config = build_model(args.model, **overrides)
+        monitor_metric = f"val_{model.loss_name}_loss"
 
-    print(
-        "Configured run:" 
-        f" seq_len={args.seq_len},"
-        f" spatial_resolution={args.spatial_resolution},"
-        f" n_layers={model_config['kwargs'].get('n_layers')},"
-        f" hidden_channels={model_config['kwargs'].get('hidden_channels')},"
-        f" n_modes={model_config['kwargs'].get('n_modes')}"
-    )
+        print(
+            "Configured run:" 
+            f" seq_len={args.seq_len},"
+            f" spatial_resolution={args.spatial_resolution},"
+            f" n_layers={model_config['kwargs'].get('n_layers')},"
+            f" hidden_channels={model_config['kwargs'].get('hidden_channels')},"
+            f" n_modes={model_config['kwargs'].get('n_modes')}"
+        )
+    else:
+        # Diffusion model setup
+        overrides = {}
+
+        if args.diffusion_dim is not None:
+            overrides['dim'] = args.diffusion_dim
+        if args.diffusion_init_dim is not None:
+            overrides['init_dim'] = args.diffusion_init_dim
+        if args.diffusion_out_dim is not None:
+            overrides['out_dim'] = args.diffusion_out_dim
+        if args.diffusion_dim_mults is not None:
+            overrides['dim_mults'] = tuple(map(int, args.diffusion_dim_mults.split(',')))
+        if args.diffusion_channels is not None:
+            overrides['channels'] = args.diffusion_channels
+        if args.diffusion_self_condition:
+            overrides['self_condition'] = True
+        if args.diffusion_learned_variance:
+            overrides['learned_variance'] = True
+        if args.diffusion_learned_sinusoidal_cond:
+            overrides['learned_sinusoidal_cond'] = True
+        if args.diffusion_random_fourier_features:
+            overrides['random_fourier_features'] = True
+        if args.diffusion_learned_sinusoidal_dim is not None:
+            overrides['learned_sinusoidal_dim'] = args.diffusion_learned_sinusoidal_dim
+        if args.diffusion_sinusoidal_pos_emb_theta is not None:
+            overrides['sinusoidal_pos_emb_theta'] = args.diffusion_sinusoidal_pos_emb_theta
+        if args.diffusion_dropout is not None:
+            overrides['dropout'] = args.diffusion_dropout
+        if args.diffusion_attn_dim_head is not None:
+            overrides['attn_dim_head'] = args.diffusion_attn_dim_head
+        if args.diffusion_attn_heads is not None:
+            overrides['attn_heads'] = args.diffusion_attn_heads
+        if args.diffusion_flash_attn:
+            overrides['flash_attn'] = True
+        if args.spatial_resolution is not None:
+            overrides['image_size'] = args.spatial_resolution
+        if args.diffusion_timesteps is not None:
+            overrides['timesteps'] = args.diffusion_timesteps
+        if args.diffusion_sampling_timesteps is not None:
+            overrides['sampling_timesteps'] = args.diffusion_sampling_timesteps
+        if args.diffusion_objective is not None:
+            overrides['objective'] = args.diffusion_objective
+        if args.diffusion_auto_normalize:
+            overrides['auto_normalize'] = True
+        if args.diffusion_min_snr_loss_weight:
+            overrides['min_snr_loss_weight'] = True
+        if args.diffusion_min_snr_gamma is not None:
+            overrides['min_snr_gamma'] = args.diffusion_min_snr_gamma
+        if args.diffusion_immiscible:
+            overrides['immiscible'] = True
+        if args.learning_rate is not None:
+            overrides['learning_rate'] = args.learning_rate
+        if args.loss_function is not None:
+            overrides['loss_function'] = args.loss_function
+        if args.num_predictions_to_log is not None:
+            overrides['num_predictions_to_log'] = args.num_predictions_to_log
+        if args.enable_val_image_logging:
+            overrides['enable_val_image_logging'] = True
+        if args.enable_inference_image_logging:
+            overrides['enable_inference_image_logging'] = True
+
+        # overrides['data_config'] = {
+        #     'batch_size': args.batch_size,
+        #     'seed': args.seed,
+        #     'normalize': args.normalize,
+        #     'num_channels': args.diffusion_channels,
+        # }
+            
+        model, model_config = build_model(args.model, **overrides)
+        monitor_metric = f"val_{model.loss_name}_loss"
+        print(
+            "Configured run for diffusion model:" 
+            f" image_size={args.spatial_resolution},"
+            f" timesteps={args.diffusion_timesteps}. Adjust timestep would reduce inference time."
+        )
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"{args.model}_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
@@ -442,10 +532,10 @@ def _train(args):
         log_every_n_steps=10,
         enable_progress_bar=True,
     )
-    
     print(f'\nStarting training ({args.max_epochs} epochs)...\n')
     trainer.fit(model, train_loader, val_loader)
-    
+
+
     if args.test:
         print(f'\nTesting best model...')
         trainer.test(model, test_loader, ckpt_path='best')

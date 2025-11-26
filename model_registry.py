@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 import lightning as L
-from model import FNOModel, TFNOModel
+from model import FNOModel, TFNOModel, DiffusionModel
 import torch
 
 
@@ -77,6 +77,43 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             'data_config': None,
         },
     ),
+    'diffusion': ModelSpec(
+        name='DiffusionModel',
+        model_class=DiffusionModel,
+        description='Diffusion model for denoising plasma data.',
+        default_params={
+            'dim': 64,
+            'init_dim': None,
+            'out_dim': None,
+            'dim_mults': (1, 2, 4, 8),
+            'channels': 2,
+            'self_condition': False,
+            'learned_variance': False,
+            'learned_sinusoidal_cond': False,
+            'random_fourier_features': False,
+            'learned_sinusoidal_dim': 16,
+            'sinusoidal_pos_emb_theta': 10000,
+            'dropout': 0.0,
+            'attn_dim_head': 32,
+            'attn_heads': 4,
+            'flash_attn': False,
+            'image_size': 512,
+            'timesteps': 1000,
+            'sampling_timesteps': None,
+            'objective': 'pred_noise',
+            'auto_normalize': True,
+            'min_snr_loss_weight': False,
+            'min_snr_gamma': 5,
+            'immiscible': False,
+            'learning_rate': 1e-3,
+            'loss_function': 'MSE',
+            'num_predictions_to_log': 1,
+            'log_images_every_n_epochs': 1,
+            'max_image_logging_epochs': None,
+            'enable_val_image_logging': False,
+            'enable_inference_image_logging': False,
+        }
+    )
 }
 
 def available_models() -> Tuple[str, ...]:

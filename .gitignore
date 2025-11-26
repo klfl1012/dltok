@@ -1,5 +1,6 @@
 /data
-
+*.pt
+diffusion_256.ckpt
 # Environment variables and secrets
 .env
 
