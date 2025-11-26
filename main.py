@@ -22,7 +22,6 @@ from dataloader import build_dataloader
 
 load_dotenv()
 
-
 def _str2bool(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -33,7 +32,22 @@ def _str2bool(value: str | bool) -> bool:
         return False
     raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
 
-
+def parse_noise_std(value):
+    """Parses noise_std input to float or tuple of two floats."""
+    # Split input by commas to handle tuple-like input
+    if ',' in value:
+        # Attempt to convert to a tuple of floats
+        try:
+            return tuple(float(x) for x in value.split(','))
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Invalid input format: {value}. Expected 'float,float'.")
+    else:
+        # Attempt to convert to a float
+        try:
+            return float(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Invalid float format: {value}.")
+        
 def _build_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
@@ -61,6 +75,13 @@ def _build_args() -> argparse.Namespace:
     
     # Data parameters
     parser.add_argument(
+        '--dataloader',
+        type=str,
+        default='PlasmaDataset',
+        help='Which dataloader to use - PlasmaDataset for FNO and DiffusionDataset for Denoising Diffusion Model'
+    )
+
+    parser.add_argument(
         '--seq_len',
         type=int,
         default=100,
@@ -83,6 +104,43 @@ def _build_args() -> argparse.Namespace:
         type=int,
         default=256,
         help='Target spatial resolution for downsampling (e.g., 256 to downsample 1024x1024 to 256x256)'
+    )
+
+    parser.add_argument(
+        '--noise_mean',
+        type=float,
+        default=0.0,
+        help='The gaussian noise mean for the diffusion dataset'
+    )
+    parser.add_argument(
+        '--noise_std',
+        type=parse_noise_std,
+        default=0.02,
+        help='The gaussian noise std for the diffusion dataset. Can either be a float or a tuple. If tuple, it is a range of values the std can take'
+    )
+    parser.add_argument(
+        '--diffusion_dataset_use_random_crop',
+        action='store_true',
+        default=True,
+        help='Whether to use random cropping in DiffusionDataset'
+    )
+    parser.add_argument(
+        '--diffusion_dataset_min_crop',
+        type=int,
+        default=32,
+        help='Size of the minimum random crop in DiffusionDataset'
+    )
+    parser.add_argument(
+        '--diffusion_dataset_max_crop',
+        type=int,
+        default=None,
+        help='Size of the maximum random crop in DiffusionDataset'
+    )
+    parser.add_argument(
+        '--use_wandb',
+        action='store_true',
+        default=False,
+        help='Use Weights & Biases for logging instead of TensorBoard'
     )
     parser.add_argument(
         '--normalize',
@@ -134,6 +192,12 @@ def _build_args() -> argparse.Namespace:
         default=None,
         help='Number of FNO layers (FNO only)'
     )
+    parser.add_argument(
+        '--rank',
+        type=float,
+        default=None,
+        help='Low-rank factorization ratio for FNO/TFNO (e.g. 0.05)'
+    )
     
     # Callbacks
     parser.add_argument(
@@ -158,6 +222,7 @@ def _build_args() -> argparse.Namespace:
         '--checkpoint_dir',
         type=str,
         default=str(Path('/dtu/blackhole/16/223702/ckpts/')),
+        # default=str(Path('/dtu/blackhole/1b/191611/DL/ckpts/')),
         help='Directory to save model checkpoints'
     )
     parser.add_argument(
@@ -197,12 +262,7 @@ def _build_args() -> argparse.Namespace:
         action='store_true',
         help='Enable image logging during inference/predict using the same sequence visualization'
     )
-    parser.add_argument(
-        '--use_wandb',
-        action='store_true',
-        default=False,
-        help='Use Weights & Biases for logging instead of TensorBoard'
-    )
+    
     parser.add_argument(
         '--wandb_project',
         type=str,
@@ -255,6 +315,8 @@ def _train(args):
         seed=args.seed,
         spatial_resolution=args.spatial_resolution,
         normalize=args.normalize,
+        dataloader=args.dataloader,
+        
     )
 
     sample_sequence, _ = train_loader.dataset[0]
@@ -280,6 +342,8 @@ def _train(args):
         overrides['hidden_channels'] = args.hidden_channels
     if args.n_layers is not None:
         overrides['n_layers'] = args.n_layers
+    if args.rank is not None:
+        overrides['rank'] = args.rank
     if args.num_predictions_to_log is not None:
         overrides['num_predictions_to_log'] = args.num_predictions_to_log
     if args.enable_val_image_logging:
@@ -477,7 +541,8 @@ def _inference(args):
         batch_size=args.batch_size,
         seed=args.seed,
         spatial_resolution=args.spatial_resolution,
-            normalize=args.normalize,
+        normalize=args.normalize,
+        dataloader=args.dataloader,
     )
 
     print('Loading model weights...')
