@@ -8,8 +8,7 @@ from boutdata import collect
 import torch.nn.functional as F
 
 DEFAULT_DATA_ROOTS = {
-    # 'data': Path('/dtu/blackhole/16/223702/data')
-    'data': Path('/dtu/blackhole/1b/191611/data')
+    'data': Path('/dtu/blackhole/16/223702/data')
 }
 
 @dataclass(frozen=True)
@@ -155,7 +154,7 @@ def build_dataloader(
     spatial_resolution: Optional[int] = DataLoaderConfig.spatial_resolution,
     channels: Tuple[str, ...] = DataLoaderConfig.channels,
     normalize: bool = DataLoaderConfig.normalize,
-    dataloader: str = 'PlasmaDataset',
+    dataset_name: str = 'PlasmaDataset',
     noise_mean: float = 0.0,
     noise_std: Union[float, Tuple[float, float]] = 0.02,
     
@@ -188,7 +187,7 @@ def build_dataloader(
 
     splits = [(X_train, y_train), (X_val, y_val), (X_test, y_test)]
 
-    if dataloader == 'PlasmaDataset':
+    if dataset_name == 'PlasmaDataset':
         train_loader, val_loader, test_loader = [
             DataLoader(
                 PlasmaDataset(X, y, spatial_resolution=spatial_resolution),

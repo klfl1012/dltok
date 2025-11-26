@@ -75,10 +75,10 @@ def _build_args() -> argparse.Namespace:
     
     # Data parameters
     parser.add_argument(
-        '--dataloader',
+        '--dataset_name',
         type=str,
         default='PlasmaDataset',
-        help='Which dataloader to use - PlasmaDataset for FNO and DiffusionDataset for Denoising Diffusion Model'
+        help='Which dataset to use - "PlasmaDataset" for FNO and "DiffusionDataset" for denoising tasks'
     )
 
     parser.add_argument(
@@ -315,8 +315,7 @@ def _train(args):
         seed=args.seed,
         spatial_resolution=args.spatial_resolution,
         normalize=args.normalize,
-        dataloader=args.dataloader,
-        
+        dataset_name=args.dataset_name,
     )
 
     sample_sequence, _ = train_loader.dataset[0]
@@ -542,7 +541,7 @@ def _inference(args):
         seed=args.seed,
         spatial_resolution=args.spatial_resolution,
         normalize=args.normalize,
-        dataloader=args.dataloader,
+        dataset_name=args.dataset_name,
     )
 
     print('Loading model weights...')
