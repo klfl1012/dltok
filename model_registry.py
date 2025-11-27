@@ -101,7 +101,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             'timesteps': 1000,
             'sampling_timesteps': None,
             'objective': 'pred_noise',
-            'auto_normalize': True,
+            'auto_normalize': False,
             'min_snr_loss_weight': False,
             'min_snr_gamma': 5,
             'immiscible': False,
@@ -112,6 +112,8 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             'max_image_logging_epochs': None,
             'enable_val_image_logging': False,
             'enable_inference_image_logging': False,
+            'data_min': float('inf'),
+            'data_max': float('-inf'),
         }
     )
 }

@@ -516,9 +516,9 @@ class DiffusionModel(BaseModel):
         # GaussianDiffusion configurations
         image_size = 512,                   # Input image size
         timesteps = 1000,                   # No. of diffusion steps
-        sampling_timesteps = None,          # The number of time steps to use during sampling.  Less than timesteps allows quicker generation
+        sampling_timesteps = 1000,          # The number of time steps to use during sampling.  Less than timesteps allows quicker generation
         objective = 'pred_noise',           # The training objective of the diffusion model.
-        auto_normalize = True,              # Whether the input data should be automatically normalized
+        auto_normalize = False,              # Whether the input data should be automatically normalized
         min_snr_loss_weight = False,        # Whether to apply a minimum signal-to-noise ratio (SNR) weighting strategy to the loss function
         min_snr_gamma = 5,                  # Used in conjunction with min_snr_loss_weight to clamp the SNR values during training
         immiscible = False,
@@ -531,6 +531,9 @@ class DiffusionModel(BaseModel):
         max_image_logging_epochs = None,
         enable_val_image_logging = False,
         enable_inference_image_logging = False,
+
+        data_min: float = float('inf'),
+        data_max: float = float('-inf'),
     ):
         """
         Initialize Diffusion model with neuralop backend.
@@ -577,8 +580,16 @@ class DiffusionModel(BaseModel):
             immiscible=immiscible,
         )
 
+        self.auto_normalize = auto_normalize
+        self.data_min = data_min
+        self.data_max = data_max
+        self.timesteps = timesteps
+        self.ddim_sampling_eta = 0.0
+
         self.loss_function = nn.MSELoss()
 
+        print("data min and max:", data_min, data_max)
+        print("auto normalize:", auto_normalize)
     def forward(self, x):
         """
         Forward pass through the denoising diffusion model.
@@ -586,34 +597,75 @@ class DiffusionModel(BaseModel):
         Supports inputs shaped as:
             - [B, C, X, Y]  (single channel)
         """
-        x = self.diffusion(x)
-        print(x.shape)
+
+        if not self.auto_normalize:
+            x = (x - self.data_min) / (self.data_max - self.data_min)
+            x = x * 2.0 - 1.0
+
+        x = self.diffusion(x) # returns the loss already
+        
         return x
-
-    @torch.inference_mode()
-    def infer(self, noisy_images):
-        """
-        Perform inference (denoising) given noisy images.
-        
-        Args:
-            noisy_images (Tensor): The input tensor of noisy images with shape [B, C, X, Y].
-        
-        Returns:
-            Tensor: Denoised images.
-        """
-        # Ensure the input is on the correct device
-        noisy_images = noisy_images.to(self.device)
-
-        # Call the p_sample_loop to denoise the images
-        denoised_images = self.diffusion.p_sample_loop(noisy_images.shape, return_all_timesteps=False)
-
-        return denoised_images
     
+    @torch.inference_mode()
+    def infer(self, x_start, steps=1000, eta=0.0):
+        device = self.device
+        diff = self.diffusion
+        x = x_start.to(device)
+        if x.ndim == 3:
+            x = x.unsqueeze(0)  # [B, C, H, W] or [B, C, L]
+
+        # Normalize to roughly [-1, 1] or whatever your training normalization was
+        if not self.auto_normalize:
+            x = (x - self.data_min) / (self.data_max - self.data_min)
+        else:
+            x = diff.normalize(x)  # assumes this does (x - data_min)/(data_max - data_min) * 2 - 1 or similar
+
+        # === DDIM sampling (unchanged until the end) ===
+        seq = torch.linspace(diff.num_timesteps-1, 0, steps+1, dtype=torch.long, device=device)
+        seq_next = torch.cat([seq[1:], torch.tensor([-1], device=device)])
+
+        x_t = x
+        pred_x0_prev = None
+
+        for i, (t_cur, t_next) in enumerate(zip(seq.tolist(), seq_next.tolist())):
+            t_tensor = torch.full((x_t.shape[0],), t_cur, device=device, dtype=torch.long)
+
+            pred_noise, pred_x0, *_ = diff.model_predictions(
+                x_t,
+                t_tensor,
+                x_self_cond=pred_x0_prev if diff.self_condition else None,
+                clip_x_start=True,
+                rederive_pred_noise=True,
+            )
+
+            alpha_cur  = diff.alphas_cumprod[t_cur]
+            alpha_next = diff.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(0.0, device=device)
+
+            sigma = eta * torch.sqrt((1 - alpha_next) / (1 - alpha_cur) * (1 - alpha_cur / alpha_next))
+
+            direction = torch.sqrt(1 - alpha_next - sigma**2) * pred_noise
+            noise = torch.randn_like(x_t)
+
+            x_t = torch.sqrt(alpha_next) * pred_x0 + direction + sigma * noise
+
+            pred_x0_prev = pred_x0
+
+            if t_next < 0:
+                x_t = pred_x0  # final deterministic step
+
+        if not self.auto_normalize:
+            # Reverse the [0,1] → original
+            x_out = (x_t + 1.0) / 2.0                                  # → [0, 1]
+            x_out = x_out * (self.data_max - self.data_min + 1e-8) + self.data_min
+        else:
+            x_out = diff.unnormalize(x_t)
+
+        return x_out.squeeze(0)
+        
     def training_step(self, batch, batch_idx):
         x, y = batch 
         x, y = x.to(self.device), y.to(self.device)
-        y_hat = self(x)
-        train_loss = self.loss_function(y_hat, y)
+        train_loss = self(y)
         
         log_dict = {
             f"train_{self.loss_name}_loss": train_loss,
@@ -632,8 +684,7 @@ class DiffusionModel(BaseModel):
     def validation_step(self, batch, batch_idx):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
-        y_hat = self(x)
-        val_loss = self.loss_function(y_hat, y)
+        val_loss = self(x)
         
         self.log(
             f"val_{self.loss_name}_loss", 
@@ -660,8 +711,7 @@ class DiffusionModel(BaseModel):
     def test_step(self, batch, batch_idx):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
-        y_hat = self(x)
-        test_loss = self.loss_function(y_hat, y)
+        test_loss = self(y)
         
         # Log metrics
         self.log(
@@ -675,26 +725,30 @@ class DiffusionModel(BaseModel):
         
         return test_loss
     
+    @torch.inference_mode()
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        x, y = batch
-        x, y = x.to(self.device), y.to(self.device)
-        y_hat = self(x)
+        noisy, clean = batch
+        noisy = noisy.to(self.device)
+        clean = clean.to(self.device)  # optional ground truth
 
-        # Optional image logging during inference
+        # This uses your infer() → DDIM denoising from real noisy image
+        denoised = self.infer(noisy, steps=2)  # Small number of steps for faster inference
+
+        # Optional: log before/after images during prediction
         # if self.enable_inference_image_logging and batch_idx == 0 and self.logger is not None:
-        #     # Log up to num_predictions_to_log samples from the first batch
-        #     num_samples = min(self.num_predictions_to_log, x.shape[0])
+        #     num_samples = min(self.num_predictions_to_log, noisy.shape[0])
         #     for i in range(num_samples):
         #         self._log_predictions_as_images(
-        #             x[i:i+1].detach().cpu(),
-        #             y[i:i+1].detach().cpu(),
-        #             y_hat[i:i+1].detach().cpu(),
+        #             x=noisy[i:i+1].cpu(),
+        #             y_true=clean[i:i+1].cpu(),
+        #             y_pred=denoised[i:i+1].cpu(),
         #             prefix='inference',
         #             sample_idx=i,
         #         )
 
-        return y_hat, y
-    
+        # Return denoised image + ground truth (for offline metrics if needed)
+        return denoised, clean
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
@@ -821,56 +875,3 @@ class DiffusionModel(BaseModel):
         
         except Exception as e:
             print(f"Warning: Could not log images: {e}")
-
-# Credits: Trainer class from https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
-# class DiffusionTrainer(Trainer):
-#     def __init__(self, data_loader, **kwargs):
-#         super().__init__(folder='', **kwargs)
-        
-#         # Store the provided DataLoader
-#         self.data_loader = data_loader
-
-#     def train(self):
-#         accelerator = self.accelerator
-#         device = accelerator.device
-
-#         with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
-#             while self.step < self.train_num_steps:
-#                 self.model.train()
-#                 total_loss = 0.0
-
-#                 for _ in range(self.gradient_accumulate_every):
-#                     # Get a batch of noisy and clean images directly from the DataLoader
-#                     noisy_images, clean_images = next(self.data_loader).to(device)
-
-#                     # Compute the actual noise
-#                     actual_noise = clean_images - noisy_images
-
-#                     with self.accelerator.autocast():
-#                         # Predict the noise from the noisy images
-#                         predicted_noise = self.model(noisy_images)
-
-#                         # Compute the loss (MSE between predicted noise and actual noise)
-#                         loss = torch.nn.functional.mse_loss(predicted_noise, actual_noise)
-#                         loss = loss / self.gradient_accumulate_every
-#                         total_loss += loss.item()
-
-#                     # Backpropagation
-#                     self.accelerator.backward(loss)
-
-#                 pbar.set_description(f'loss: {total_loss:.4f}')
-#                 accelerator.wait_for_everyone()
-#                 accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-
-#                 self.opt.step()
-#                 self.opt.zero_grad()
-#                 accelerator.wait_for_everyone()
-
-#                 self.step += 1
-#                 if accelerator.is_main_process:
-#                     self.ema.update()
-#                     if self.step != 0 and divisible_by(self.step, self.save_and_sample_every):
-#                         self._sample_and_log_images()
-#                 pbar.update(1)
-
-#         accelerator.print('training complete')

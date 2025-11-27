@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 from copy import deepcopy
 from itertools import product
+from tqdm import tqdm
 import wandb
 from model_registry import (
     build_model,
@@ -446,7 +447,17 @@ def _train(args):
         #     'normalize': args.normalize,
         #     'num_channels': args.diffusion_channels,
         # }
+
+        data_min = float('inf')
+        data_max = float('-inf')
+
+        for x, y in tqdm(train_loader, desc="Computing data range"):
+            data_min = min(data_min, y.min().item())
+            data_max = max(data_max, y.max().item())
             
+        overrides['data_min'] = data_min
+        overrides['data_max'] = data_max
+
         model, model_config = build_model(args.model, **overrides)
         monitor_metric = f"val_{model.loss_name}_loss"
         print(
