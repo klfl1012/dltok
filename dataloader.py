@@ -199,27 +199,29 @@ def build_dataloader(
             )
             for X, y in splits
         ]
+    # else:
+    #     num_images = data_flattened.shape[0]
+    #     train_end = int(num_images * train_split)
+    #     val_end = int(num_images * (train_split + val_split))
+
+    #     X_train = data_flattened[:train_end]
+    #     X_val = data_flattened[train_end:val_end]
+    #     X_test = data_flattened[val_end:]
+
+    #     splits = [X_train, X_val, X_test]
+
+    #     train_loader, val_loader, test_loader = [
+    #         DataLoader(
+    #             DiffusionDataset(X, X, spatial_resolution=spatial_resolution, noise_mean = noise_mean ,noise_std = noise_std),
+    #             batch_size=batch_size,
+    #             shuffle=shuffle,
+    #             num_workers=num_workers,
+    #             pin_memory=pin_memory
+    #         )
+    #         for X in splits
+    #     ]
     else:
-        num_images = data_flattened.shape[0]
-        train_end = int(num_images * train_split)
-        val_end = int(num_images * (train_split + val_split))
-
-        X_train = data_flattened[:train_end]
-        X_val = data_flattened[train_end:val_end]
-        X_test = data_flattened[val_end:]
-
-        splits = [X_train, X_val, X_test]
-
-        train_loader, val_loader, test_loader = [
-            DataLoader(
-                DiffusionDataset(X, X, spatial_resolution=spatial_resolution, noise_mean = noise_mean ,noise_std = noise_std),
-                batch_size=batch_size,
-                shuffle=shuffle,
-                num_workers=num_workers,
-                pin_memory=pin_memory
-            )
-            for X in splits
-        ]
+        raise ValueError(f'Unsupported dataset_name: {dataset_name}. Supported: PlasmaDataset')
      
     print(
         "Data loaded: Original size, target resolution:"

@@ -8,6 +8,7 @@ from neuralop import FNO, TFNO
 from losses import *
 import matplotlib.pyplot as plt
 import numpy as np
+from torchmetrics.image import StructuralSimilarityIndexMeasure, MultiScaleStructuralSimilarityIndexMeasure
 
 
 class BaseModel(L.LightningModule):
@@ -25,7 +26,10 @@ class BaseModel(L.LightningModule):
         self.enable_inference_image_logging = enable_inference_image_logging
         
         self.validation_step_outputs = []
-        
+
+        self.ssim = StructuralSimilarityIndexMeasure()
+        self.mssim = MultiScaleStructuralSimilarityIndexMeasure(betas=(0.0448, 0.2856, 0.3001), kernel_size=7)
+
         # Map string names to concrete loss implementations.
         if loss_function in ("MSE", "L2", "LpLoss"):
             self.loss_function = Neuralop_LpLoss()
@@ -35,6 +39,21 @@ class BaseModel(L.LightningModule):
             self.loss_function = Neuralop_H1Loss()
         else:
             raise ValueError(f"Unsupported loss function: {loss_function}")
+
+    def _compute_loss(self, y_hat, y, inputs=None):
+        """Call loss function, passing `inputs` when accepted by the loss.
+
+        This helper tries to call the configured loss with (pred, true, inputs)
+        and falls back to (pred, true) when the loss doesn't expect an inputs
+        argument.
+        """
+        if self.loss_function is None:
+            raise RuntimeError('Loss function not configured; ensure model initializes LossMHD with correct data_config or choose a supported loss.')
+        try:
+            # Some losses (physics-informed) expect the original inputs
+            return self.loss_function(y_hat, y, inputs)
+        except TypeError:
+            return self.loss_function(y_hat, y)
     
     @abstractmethod
     def forward(self, x):
@@ -44,7 +63,7 @@ class BaseModel(L.LightningModule):
         x, y = batch 
         x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
-        train_loss = self.loss_function(y_hat, y)
+        train_loss = self._compute_loss(y_hat, y, x)
         
         log_dict = {
             f"train_{self.loss_name}_loss": train_loss,
@@ -64,7 +83,7 @@ class BaseModel(L.LightningModule):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
-        val_loss = self.loss_function(y_hat, y)
+        val_loss = self._compute_loss(y_hat, y, x)
         
         self.log(
             f"val_{self.loss_name}_loss", 
@@ -92,17 +111,21 @@ class BaseModel(L.LightningModule):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
-        test_loss = self.loss_function(y_hat, y)
-        
-        # Log metrics
-        self.log(
-            f"test_{self.loss_name}_loss", 
-            test_loss, 
-            prog_bar=True, 
-            on_step=False, 
-            on_epoch=True,
-            logger=True
-        )
+        test_loss = self._compute_loss(y_hat, y, x)
+        self.log(f"test_{self.loss_name}_loss", test_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
+
+        # Compute additional metrics
+        ssim_scores = []
+        mssim_scores = []
+        for t in range(y_hat.shape[1]):
+            ssim_scores.append(self.ssim(y_hat[:, t], y[:, t]))
+            mssim_scores.append(self.mssim(y_hat[:, t], y[:, t]))
+
+        ssim = torch.stack(ssim_scores).mean()
+        mssim = torch.stack(mssim_scores).mean()
+
+        self.log("test_ssim", ssim, prog_bar=False, on_step=False, on_epoch=True, logger=True)
+        self.log("test_mssim", mssim, prog_bar=False, on_step=False, on_epoch=True, logger=True)
         
         return test_loss
     

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,7 +168,7 @@ def _build_args() -> argparse.Namespace:
         '--loss_function',
         type=str,
         default=None,
-        choices=['MSE', 'L2', 'MSE+Grad', 'H1', 'LpLoss'],
+        choices=['MSE', 'L2', 'MSE+Grad', 'H1', 'LpLoss', 'MHD'],
         help='Loss function (overrides model default)'
     )
     
@@ -221,7 +220,7 @@ def _build_args() -> argparse.Namespace:
     parser.add_argument(
         '--checkpoint_dir',
         type=str,
-        default=str(Path('/dtu/blackhole/16/223702/ckpts/')),
+        default=str(os.getenv('CHECKPOINT_ROOT', 'checkpoints')),
         # default=str(Path('/dtu/blackhole/1b/191611/DL/ckpts/')),
         help='Directory to save model checkpoints'
     )
@@ -293,13 +292,6 @@ def _build_args() -> argparse.Namespace:
         action='store_true',
         help='Enable automated ablation study across seq_len and/or spatial_resolution (train mode only)'
     )
-    parser.add_argument(
-        '--ablation_mode',
-        type=str,
-        choices=['seq_len', 'spatial_resolution', 'grid'],
-        default='grid',
-        help='Ablation strategy: vary seq_len only, spatial_resolution only, or run the Cartesian grid'
-    )
 
     return parser.parse_args()
 
@@ -319,7 +311,6 @@ def _train(args):
     )
 
     sample_sequence, _ = train_loader.dataset[0]
-    num_channels = sample_sequence.shape[1] if sample_sequence.ndim >= 2 else 1
 
     print('Building model...')
     overrides = {}
@@ -329,7 +320,6 @@ def _train(args):
         'spatial_resolution': args.spatial_resolution,
         'seed': args.seed,
         'normalize': args.normalize,
-        'num_channels': num_channels,
     }
     if args.learning_rate is not None:
         overrides['learning_rate'] = args.learning_rate
@@ -349,8 +339,6 @@ def _train(args):
         overrides['enable_val_image_logging'] = True
     if args.enable_inference_image_logging:
         overrides['enable_inference_image_logging'] = True
-    overrides['in_channels'] = num_channels
-    overrides['out_channels'] = num_channels
     overrides['data_config'] = data_config
 
     model, model_config = build_model(args.model, **overrides)
@@ -393,7 +381,6 @@ def _train(args):
         callbacks.append(early_stop_callback)
 
     # Setup logger (WandB or TensorBoard)
-
     if args.use_wandb:
         api_key = os.environ.get('WANDB_API_KEY')
         if api_key:
@@ -452,7 +439,6 @@ def _train(args):
     
     if args.run_inference_after_train:
         if args.use_wandb and not wandb_closed:
-            import wandb
             wandb.finish()
             wandb_closed = True
         checkpoint_path = checkpoint_callback.best_model_path or checkpoint_callback.last_model_path
@@ -477,28 +463,17 @@ def _run_ablation(args):
 
     @dataclass(frozen=True)
     class AblationDefaults:
-        seq_lens: tuple[int, ...] = (1, 2, 3, 4, 5)
-        spatial_resolutions: tuple[int, ...] = (64, 128, 256, 512)
+        seq_lens: tuple[int, ...] = (1, 2, 4, 5)
 
     seq_values = AblationDefaults.seq_lens
-    res_values = AblationDefaults.spatial_resolutions
 
-    if args.ablation_mode == 'seq_len':
-        combos = [(seq, args.spatial_resolution) for seq in seq_values]
-    elif args.ablation_mode == 'spatial_resolution':
-        combos = [(args.seq_len, res) for res in res_values]
-    else:  
-        combos = list(product(seq_values, res_values))
+    print(f"\nStarting ablation study ({len(seq_values)} runs)'\n")
 
-    total_runs = len(combos)
-    print(f"\nStarting ablation study ({total_runs} runs) with mode='{args.ablation_mode}'\n")
-
-    for idx, (seq_len, spat_res) in enumerate(combos, start=1):
-        print(f"\n[Ablation {idx}/{total_runs}] seq_len={seq_len}, spatial_resolution={spat_res}\n")
+    for idx, seq_len in enumerate(seq_values, start=1):
+        print(f"\n[Ablation {idx}/{len(seq_values)}] seq_len={seq_len}\n")
         run_args = deepcopy(args)
-        run_args.ablation_study = False  # Prevent recursion
+        run_args.ablation_study = False # Prevent recursion
         run_args.seq_len = seq_len
-        run_args.spatial_resolution = spat_res
         _train(run_args)
 
 
@@ -618,7 +593,6 @@ def _inference(args):
     print(f'\nPredictions saved to: {output_file}\n')
 
     if args.use_wandb:
-        import wandb
         artifact = wandb.Artifact(name=f'{run_name}-predictions', type='predictions')
         artifact.add_file(str(output_file))
         logger.experiment.log_artifact(artifact)

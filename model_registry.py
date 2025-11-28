@@ -171,7 +171,9 @@ def load_model_from_checkpoint(
 
     hyper_parameters = checkpoint.get('hyper_parameters', {})
     model = spec.model_class(**hyper_parameters)
-    model.load_state_dict(state_dict, strict=True)
+    # Allow loading older checkpoints that do not contain new submodules
+    # (e.g. new metric or loss modules) by using strict=False.
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
 
