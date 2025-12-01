@@ -65,9 +65,8 @@ class ProbeVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         
         # Decode using the frozen VAE decoder
-        # The VAE decoder expects z
-        # MultiScaleVAE.decode(z) -> dict of outputs
-        outputs = self.vae_model.decode(z)
+        # MultiScaleVAE has a decoder attribute, not a decode method
+        outputs = self.vae_model.decoder(z)
         
         return outputs, mu, logvar
     

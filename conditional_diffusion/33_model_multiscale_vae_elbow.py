@@ -128,7 +128,7 @@ class ProgressiveDecoder(nn.Module):
         latent_dim: int = 256,
         out_channels: int = 2,
         base_channels: int = 32,
-        target_sizes: List[int] = [64, 128, 256],
+        target_sizes: List[int] = [64, 128, 256, 512],
     ):
         super().__init__()
         
@@ -182,7 +182,7 @@ class MultiScaleVAE(nn.Module):
         in_channels: int = 2,
         latent_dim: int = 256,
         base_channels: int = 32,
-        target_sizes: List[int] = [64, 128, 256],
+        target_sizes: List[int] = [64, 128, 256, 512],
     ):
         super().__init__()
         
@@ -236,6 +236,50 @@ def elbow_loss(
         # Elbow Loss (Smooth L1)
         # beta=1.0 means L2 for |x|<1, L1 for |x|>1
         scale_loss = F.smooth_l1_loss(output, target_scaled, reduction='mean', beta=1.0)
+        
+        scale_losses[size] = scale_loss
+        total_recon_loss += scale_weights[size] * scale_loss
+    
+    total_recon_loss = total_recon_loss / total_weight
+    
+    # KL divergence
+    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    kl_loss = kl_loss / target.size(0)
+    
+    loss = total_recon_loss + kl_weight * kl_loss
+    
+    return loss, total_recon_loss, kl_loss, scale_losses
+
+
+def mse_loss(
+    outputs: Dict[int, torch.Tensor],
+    target: torch.Tensor,
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    kl_weight: float = 1e-4,
+    scale_weights: Dict[int, float] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[int, torch.Tensor]]:
+    """
+    MSE Loss + KL Divergence.
+    """
+    if scale_weights is None:
+        scale_weights = {size: 1.0 for size in outputs.keys()}
+    
+    scale_losses = {}
+    total_recon_loss = 0.0
+    total_weight = sum(scale_weights.values())
+    
+    for size, output in outputs.items():
+        # Downsample target to match this scale
+        if target.shape[-1] != size:
+            target_scaled = F.interpolate(
+                target, size=(size, size), mode='bilinear', align_corners=False
+            )
+        else:
+            target_scaled = target
+            
+        # MSE Loss
+        scale_loss = F.mse_loss(output, target_scaled, reduction='mean')
         
         scale_losses[size] = scale_loss
         total_recon_loss += scale_weights[size] * scale_loss

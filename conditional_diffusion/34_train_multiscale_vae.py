@@ -27,38 +27,46 @@ model_vae = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(model_vae)
 MultiScaleVAE = model_vae.MultiScaleVAE
 elbow_loss = model_vae.elbow_loss
+mse_loss = model_vae.mse_loss
 count_parameters = model_vae.count_parameters
 
 
-def train_epoch(model, dataloader, optimizer, device, kl_weight, scale_weights, use_amp, scaler):
+def train_epoch(model, dataloader, optimizer, device, kl_weight, scale_weights, use_amp, scaler, loss_type='elbow'):
     model.train()
     total_loss = 0.0
     total_recon = 0.0
     total_kl = 0.0
     num_batches = 0
     
-    for clean, noisy in dataloader:
-        clean = clean.to(device)
-        # For VAE, we typically use clean data as input and target
-        # Or noisy input -> clean target for denoising VAE
-        # Here we use clean -> clean for standard VAE
+    for data in dataloader:
+        data = data.to(device)
         
         optimizer.zero_grad()
         
         if use_amp:
             with autocast(device_type='cuda', dtype=torch.float16):
-                outputs, mu, logvar = model(clean)
-                loss, recon_loss, kl_loss, _ = elbow_loss(
-                    outputs, clean, mu, logvar, kl_weight, scale_weights
-                )
+                outputs, mu, logvar = model(data)
+                if loss_type == 'mse':
+                    loss, recon_loss, kl_loss, _ = mse_loss(
+                        outputs, data, mu, logvar, kl_weight, scale_weights
+                    )
+                else:
+                    loss, recon_loss, kl_loss, _ = elbow_loss(
+                        outputs, data, mu, logvar, kl_weight, scale_weights
+                    )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs, mu, logvar = model(clean)
-            loss, recon_loss, kl_loss, _ = elbow_loss(
-                outputs, clean, mu, logvar, kl_weight, scale_weights
-            )
+            outputs, mu, logvar = model(data)
+            if loss_type == 'mse':
+                loss, recon_loss, kl_loss, _ = mse_loss(
+                    outputs, data, mu, logvar, kl_weight, scale_weights
+                )
+            else:
+                loss, recon_loss, kl_loss, _ = elbow_loss(
+                    outputs, data, mu, logvar, kl_weight, scale_weights
+                )
             loss.backward()
             optimizer.step()
         
@@ -71,7 +79,7 @@ def train_epoch(model, dataloader, optimizer, device, kl_weight, scale_weights, 
 
 
 @torch.no_grad()
-def validate(model, dataloader, device, kl_weight, scale_weights):
+def validate(model, dataloader, device, kl_weight, scale_weights, loss_type='elbow'):
     model.eval()
     total_loss = 0.0
     total_recon = 0.0
@@ -79,13 +87,18 @@ def validate(model, dataloader, device, kl_weight, scale_weights):
     num_batches = 0
     all_scale_losses = {}
     
-    for clean, noisy in dataloader:
-        clean = clean.to(device)
+    for data in dataloader:
+        data = data.to(device)
         
-        outputs, mu, logvar = model(clean)
-        loss, recon_loss, kl_loss, scale_losses = elbow_loss(
-            outputs, clean, mu, logvar, kl_weight, scale_weights
-        )
+        outputs, mu, logvar = model(data)
+        if loss_type == 'mse':
+            loss, recon_loss, kl_loss, scale_losses = mse_loss(
+                outputs, data, mu, logvar, kl_weight, scale_weights
+            )
+        else:
+            loss, recon_loss, kl_loss, scale_losses = elbow_loss(
+                outputs, data, mu, logvar, kl_weight, scale_weights
+            )
         
         total_loss += loss.item()
         total_recon += recon_loss.item()
@@ -104,15 +117,20 @@ def validate(model, dataloader, device, kl_weight, scale_weights):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=str, default="/dtu/blackhole/1b/223803/bout_data")
+    parser.add_argument("--data-dir", type=str, default="/dtu/blackhole/1b/223803/tcv_data")
     parser.add_argument("--variables", type=str, nargs="+", default=["n", "phi"])
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--kl-weight", type=float, default=1e-4)
+    parser.add_argument("--kl-weight", type=float, default=1e-4, help="KL divergence weight")
     parser.add_argument("--output", type=str, default="/dtu/blackhole/1b/223803/runs/multiscale_vae_elbow")
     parser.add_argument("--use-amp", action="store_true")
-    parser.add_argument("--save-every", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
+    
+    # Model architecture options
+    parser.add_argument("--latent-dim", type=int, default=256, help="Latent space dimension")
+    parser.add_argument("--base-channels", type=int, default=32, help="Base number of channels")
+    parser.add_argument("--loss-type", type=str, default="elbow", choices=["elbow", "mse"], help="Reconstruction loss type")
     
     args = parser.parse_args()
     
@@ -121,43 +139,46 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Training Multi-Scale VAE with Elbow Loss")
+    print(f"Data directory: {args.data_dir}")
     print(f"Variables: {args.variables}")
     
     train_loader, val_loader = build_dataloaders(
         data_dir=args.data_dir,
         variables=args.variables,
-        noise_level=0.0,  # No noise for standard VAE
         batch_size=args.batch_size,
         num_workers=4,
-        resize=256,
-        lazy_load=True,
     )
     
     model = MultiScaleVAE(
         in_channels=len(args.variables),
-        latent_dim=256,
-        base_channels=32,
-        target_sizes=[64, 128, 256],
+        latent_dim=args.latent_dim,
+        base_channels=args.base_channels,
+        target_sizes=[64, 128, 256, 512],
     ).to(device)
     
     print(f"Model parameters: {count_parameters(model):,}")
+    print(f"Configuration: latent_dim={args.latent_dim}, base_channels={args.base_channels}, loss={args.loss_type}, kl_weight={args.kl_weight}")
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
     scaler = GradScaler(device='cuda') if args.use_amp else None
     
-    scale_weights = {64: 0.5, 128: 1.0, 256: 2.0}
+    scale_weights = {64: 0.5, 128: 1.0, 256: 2.0, 512: 4.0}
     best_val_loss = float('inf')
+    patience_counter = 0
+    
+    # Set loss type
+    loss_type = args.loss_type
     
     for epoch in range(1, args.epochs + 1):
         start = time.time()
         
         train_loss, train_recon, train_kl = train_epoch(
-            model, train_loader, optimizer, device, args.kl_weight, scale_weights, args.use_amp, scaler
+            model, train_loader, optimizer, device, args.kl_weight, scale_weights, args.use_amp, scaler, loss_type
         )
         
         val_loss, val_recon, val_kl, val_scale_losses = validate(
-            model, val_loader, device, args.kl_weight, scale_weights
+            model, val_loader, device, args.kl_weight, scale_weights, loss_type
         )
         
         scheduler.step(val_loss)
@@ -168,18 +189,18 @@ def main():
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            patience_counter = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'val_loss': val_loss,
             }, output_dir / "best_model.pt")
             print("  -> Saved best model")
-            
-        if epoch % args.save_every == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-            }, output_dir / f"checkpoint_epoch_{epoch}.pt")
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print(f"Early stopping triggered after {epoch} epochs (patience={args.patience})")
+                break
 
 if __name__ == "__main__":
     main()
