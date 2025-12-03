@@ -112,25 +112,19 @@ class DiffusionDataset(Dataset):
         x = self.data[idx]  # [C, X, Y]
         y = self.targets[idx]  # [C, X, Y]
 
-        # 1. Resize images - per channel resizing
         if self.spatial_resolution is not None:
-            # 1.1 Merge time and channel dims for interpolation then reshape back
             C, X, Y = x.shape
             x = x.reshape(C, 1, X, Y)
             y = y.reshape(C, 1, X, Y)
 
-            # 1.2. Resize images
             x = F.interpolate(x, size=(self.spatial_resolution, self.spatial_resolution), 
                                 mode='bilinear', align_corners=False)
             y = F.interpolate(y, size=(self.spatial_resolution, self.spatial_resolution), 
                                 mode='bilinear', align_corners=False)
 
-            # 1.3 Reshape back
             x = x.reshape(C, self.spatial_resolution, self.spatial_resolution)
             y = y.reshape(C, self.spatial_resolution, self.spatial_resolution)
 
-        # 2 Add Gaussian noise to the resized images
-        # 2.1 Get the std for noise
         if isinstance(self.noise_std, tuple):
             noise_std = np.random.uniform(self.noise_std[0], self.noise_std[1])            
         else:
@@ -227,6 +221,7 @@ def build_dataloader(
         "Data loaded: Original size, target resolution:"
         f" {spatial_resolution if spatial_resolution else 'original'}"
         f", normalization={'on' if normalize else 'off'}"
+        f", dataset lengths: train={len(train_loader)}, val={len(val_loader)}, test={len(test_loader)}"
     )
     
     return train_loader, val_loader, test_loader

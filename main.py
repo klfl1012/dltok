@@ -9,7 +9,6 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from copy import deepcopy
-from itertools import product
 import wandb
 from model_registry import (
     build_model,
@@ -261,6 +260,13 @@ def _build_args() -> argparse.Namespace:
         action='store_true',
         help='Enable image logging during inference/predict using the same sequence visualization'
     )
+
+    parser.add_argument(
+        '--timestep_to_show',
+        type=str,
+        default=None,
+        help='Which timestep(s) to show when logging images: None (default), "last", "random", an int index, or comma-separated list of ints'
+    )
     
     parser.add_argument(
         '--wandb_project',
@@ -311,15 +317,21 @@ def _train(args):
     )
 
     sample_sequence, _ = train_loader.dataset[0]
+    # sample_sequence shape: [T, C, X, Y] or [T, X, Y]
+    num_channels = sample_sequence.shape[1] if sample_sequence.ndim == 4 else 1
 
     print('Building model...')
     overrides = {}
+    # ensure model is created with matching input/output channels
+    overrides['in_channels'] = num_channels
+    overrides['out_channels'] = num_channels
     data_config = {
         'seq_len': args.seq_len,
         'batch_size': args.batch_size,
         'spatial_resolution': args.spatial_resolution,
         'seed': args.seed,
         'normalize': args.normalize,
+        'num_channels': num_channels,
     }
     if args.learning_rate is not None:
         overrides['learning_rate'] = args.learning_rate
@@ -342,6 +354,7 @@ def _train(args):
     overrides['data_config'] = data_config
 
     model, model_config = build_model(args.model, **overrides)
+    object.__setattr__(model, 'sample_to_show', args.timestep_to_show)
     monitor_metric = f"val_{model.loss_name}_loss"
 
     print(
@@ -493,7 +506,6 @@ def _inference(args):
     checkpoint_data_config = checkpoint_hparams.get('data_config')
 
     if checkpoint_data_config and not args.ignore_checkpoint_data_config:
-        # Override CLI args with stored training configuration to avoid mismatches.
         for key in ('seq_len', 'spatial_resolution', 'batch_size', 'seed'):
             value = checkpoint_data_config.get(key)
             if value is not None:
@@ -525,6 +537,7 @@ def _inference(args):
         model_name=args.model,
         checkpoint_data=checkpoint_data,
     )
+    object.__setattr__(model, 'sample_to_show', args.timestep_to_show)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"{args.model}_inference_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"
