@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from neuralop.losses import H1Loss, LpLoss
 
+__all__ = ["Neuralop_LpLoss", "Neuralop_H1Loss", "GradientLoss", "MSEWithGradientLoss"]
+
+
 
 class Neuralop_LpLoss(nn.Module):
 
@@ -61,5 +64,3 @@ class MSEWithGradientLoss(nn.Module):
         loss = mse_loss + self.alpha * grad_loss
 
         return loss
-
-__all__ = ["Neuralop_LpLoss", "Neuralop_H1Loss", "GradientLoss", "MSEWithGradientLoss"]

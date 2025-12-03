@@ -22,8 +22,8 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         default_params={
             'n_modes': (8, 8, 8),
             'hidden_channels': 64,
-            'in_channels': 1,  # Single channel input (density field)
-            'out_channels': 1,  # Single channel output
+            'in_channels': 1,  
+            'out_channels': 1, 
             'n_layers': 4,
             'stabilizer': None,
             'norm': None,
@@ -171,8 +171,6 @@ def load_model_from_checkpoint(
 
     hyper_parameters = checkpoint.get('hyper_parameters', {})
     model = spec.model_class(**hyper_parameters)
-    # Allow loading older checkpoints that do not contain new submodules
-    # (e.g. new metric or loss modules) by using strict=False.
     model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model

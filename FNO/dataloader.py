@@ -6,10 +6,11 @@ from typing import Tuple, List, Optional, Union
 import numpy as np
 from boutdata import collect
 import torch.nn.functional as F
+import os
 
 DEFAULT_DATA_ROOTS = {
-    'data': Path('/dtu/blackhole/16/223702/data')
-    # 'data': Path('/dtu/blackhole/1b/191611/data')
+    # 'data': Path(os.getenv('DATA_ROOT', '/dtu/blackhole/16/223702/TCV-DATA'))
+    'data': Path("/dtu-compute/proj-jehi/TCV-DATA")
 }
 
 @dataclass(frozen=True)
@@ -53,16 +54,13 @@ class PlasmaDataset(Dataset):
         x = self.data[idx]   # [T, C, X, Y] or [T, X, Y]
         y = self.targets[idx]
 
-        # Ensure we always have a channel dimension: [T, C, X, Y]
         if x.ndim == 3:
             x = x.unsqueeze(1)  # [T, 1, X, Y]
             y = y.unsqueeze(1)
 
-        # Downsample if spatial_resolution is specified
         if self.spatial_resolution is not None:
             T, C, X, Y = x.shape
             if X != self.spatial_resolution or Y != self.spatial_resolution:
-                # [T, C, X, Y] -> [T*C, 1, X, Y] for interpolation
                 x = x.view(T * C, 1, X, Y)
                 y = y.view(T * C, 1, X, Y)
 
@@ -79,7 +77,6 @@ class PlasmaDataset(Dataset):
                     align_corners=False,
                 )
 
-                # Back to [T, C, X, Y]
                 x = x.view(T, C, self.spatial_resolution, self.spatial_resolution)
                 y = y.view(T, C, self.spatial_resolution, self.spatial_resolution)
 
@@ -112,25 +109,19 @@ class DiffusionDataset(Dataset):
         x = self.data[idx]  # [C, X, Y]
         y = self.targets[idx]  # [C, X, Y]
 
-        # 1. Resize images - per channel resizing
         if self.spatial_resolution is not None:
-            # 1.1 Merge time and channel dims for interpolation then reshape back
             C, X, Y = x.shape
             x = x.reshape(C, 1, X, Y)
             y = y.reshape(C, 1, X, Y)
 
-            # 1.2. Resize images
             x = F.interpolate(x, size=(self.spatial_resolution, self.spatial_resolution), 
                                 mode='bilinear', align_corners=False)
             y = F.interpolate(y, size=(self.spatial_resolution, self.spatial_resolution), 
                                 mode='bilinear', align_corners=False)
 
-            # 1.3 Reshape back
             x = x.reshape(C, self.spatial_resolution, self.spatial_resolution)
             y = y.reshape(C, self.spatial_resolution, self.spatial_resolution)
 
-        # 2 Add Gaussian noise to the resized images
-        # 2.1 Get the std for noise
         if isinstance(self.noise_std, tuple):
             noise_std = np.random.uniform(self.noise_std[0], self.noise_std[1])            
         else:
@@ -227,6 +218,8 @@ def build_dataloader(
         "Data loaded: Original size, target resolution:"
         f" {spatial_resolution if spatial_resolution else 'original'}"
         f", normalization={'on' if normalize else 'off'}"
+        f", dataloaders with len (train/val/test): "
+        f"({len(train_loader)}, {len(val_loader)}, {len(test_loader)})"
     )
     
     return train_loader, val_loader, test_loader

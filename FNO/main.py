@@ -9,7 +9,6 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from copy import deepcopy
-from itertools import product
 import wandb
 from model_registry import (
     build_model,
@@ -33,15 +32,12 @@ def _str2bool(value: str | bool) -> bool:
 
 def parse_noise_std(value):
     """Parses noise_std input to float or tuple of two floats."""
-    # Split input by commas to handle tuple-like input
     if ',' in value:
-        # Attempt to convert to a tuple of floats
         try:
             return tuple(float(x) for x in value.split(','))
         except ValueError:
             raise argparse.ArgumentTypeError(f"Invalid input format: {value}. Expected 'float,float'.")
     else:
-        # Attempt to convert to a float
         try:
             return float(value)
         except ValueError:
@@ -221,7 +217,6 @@ def _build_args() -> argparse.Namespace:
         '--checkpoint_dir',
         type=str,
         default=str(os.getenv('CHECKPOINT_ROOT', 'checkpoints')),
-        # default=str(Path('/dtu/blackhole/1b/191611/DL/ckpts/')),
         help='Directory to save model checkpoints'
     )
     parser.add_argument(
@@ -260,6 +255,13 @@ def _build_args() -> argparse.Namespace:
         '--enable_inference_image_logging',
         action='store_true',
         help='Enable image logging during inference/predict using the same sequence visualization'
+    )
+
+    parser.add_argument(
+        '--timestep_to_show',
+        type=str,
+        default=None,
+        help='Which timestep(s) to show when logging images: None (default), "last", "random", an int index, or comma-separated list of ints'
     )
     
     parser.add_argument(
@@ -311,15 +313,19 @@ def _train(args):
     )
 
     sample_sequence, _ = train_loader.dataset[0]
+    num_channels = sample_sequence.shape[1] if sample_sequence.ndim == 4 else 1
 
     print('Building model...')
     overrides = {}
+    overrides['in_channels'] = num_channels
+    overrides['out_channels'] = num_channels
     data_config = {
         'seq_len': args.seq_len,
         'batch_size': args.batch_size,
         'spatial_resolution': args.spatial_resolution,
         'seed': args.seed,
         'normalize': args.normalize,
+        'num_channels': num_channels,
     }
     if args.learning_rate is not None:
         overrides['learning_rate'] = args.learning_rate
@@ -342,6 +348,7 @@ def _train(args):
     overrides['data_config'] = data_config
 
     model, model_config = build_model(args.model, **overrides)
+    object.__setattr__(model, 'sample_to_show', args.timestep_to_show)
     monitor_metric = f"val_{model.loss_name}_loss"
 
     print(
@@ -525,6 +532,7 @@ def _inference(args):
         model_name=args.model,
         checkpoint_data=checkpoint_data,
     )
+    object.__setattr__(model, 'sample_to_show', args.timestep_to_show)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"{args.model}_inference_res{args.spatial_resolution}_seq{args.seq_len}_{timestamp}"

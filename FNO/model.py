@@ -18,9 +18,9 @@ class BaseModel(L.LightningModule):
         super().__init__()
         self.learning_rate = learning_rate
         self.loss_name = loss_function
-        self.num_predictions_to_log = num_predictions_to_log  # Number of sequence predictions to visualize
+        self.num_predictions_to_log = num_predictions_to_log
         self.log_images_every_n_epochs = max(1, int(log_images_every_n_epochs))
-        self.max_image_logging_epochs = max_image_logging_epochs  # None = no global cap
+        self.max_image_logging_epochs = max_image_logging_epochs
         self._image_logging_epochs = 0
         self.enable_val_image_logging = enable_val_image_logging
         self.enable_inference_image_logging = enable_inference_image_logging
@@ -30,7 +30,6 @@ class BaseModel(L.LightningModule):
         self.ssim = StructuralSimilarityIndexMeasure()
         self.mssim = MultiScaleStructuralSimilarityIndexMeasure(betas=(0.0448, 0.2856, 0.3001), kernel_size=7)
 
-        # Map string names to concrete loss implementations.
         if loss_function in ("MSE", "L2", "LpLoss"):
             self.loss_function = Neuralop_LpLoss()
         elif loss_function == "MSE+Grad":
@@ -50,7 +49,6 @@ class BaseModel(L.LightningModule):
         if self.loss_function is None:
             raise RuntimeError('Loss function not configured; ensure model initializes LossMHD with correct data_config or choose a supported loss.')
         try:
-            # Some losses (physics-informed) expect the original inputs
             return self.loss_function(y_hat, y, inputs)
         except TypeError:
             return self.loss_function(y_hat, y)
@@ -134,18 +132,42 @@ class BaseModel(L.LightningModule):
         x, y = x.to(self.device), y.to(self.device)
         y_hat = self(x)
 
-        # Optional image logging during inference
-        if self.enable_inference_image_logging and batch_idx == 0 and self.logger is not None:
-            # Log up to num_predictions_to_log samples from the first batch
-            num_samples = min(self.num_predictions_to_log, x.shape[0])
-            for i in range(num_samples):
-                self._log_predictions_as_images(
-                    x[i:i+1].detach().cpu(),
-                    y[i:i+1].detach().cpu(),
-                    y_hat[i:i+1].detach().cpu(),
-                    prefix='inference',
-                    sample_idx=i,
-                )
+        if self.enable_inference_image_logging and self.logger is not None:
+            sample_to_show = getattr(self, 'sample_to_show', None)
+            batch_size = int(x.shape[0])
+            logged = False
+
+            if sample_to_show is not None:
+                try:
+                    sample_global_idx = int(sample_to_show)
+                except Exception:
+                    sample_global_idx = None
+
+                if sample_global_idx is not None:
+                    batch_start = batch_idx * batch_size
+                    batch_end = batch_start + batch_size  # exclusive
+                    if batch_start <= sample_global_idx < batch_end:
+                        local_i = sample_global_idx - batch_start
+                        self._log_predictions_as_images(
+                            x[local_i:local_i+1].detach().cpu(),
+                            y[local_i:local_i+1].detach().cpu(),
+                            y_hat[local_i:local_i+1].detach().cpu(),
+                            prefix='inference',
+                            sample_idx=sample_global_idx,
+                        )
+                        logged = True
+
+            if not logged:
+                if batch_idx == 0:
+                    num_samples = min(self.num_predictions_to_log, batch_size)
+                    for i in range(num_samples):
+                        self._log_predictions_as_images(
+                            x[i:i+1].detach().cpu(),
+                            y[i:i+1].detach().cpu(),
+                            y_hat[i:i+1].detach().cpu(),
+                            prefix='inference',
+                            sample_idx=i,
+                        )
 
         return y_hat, y
     
@@ -184,10 +206,9 @@ class BaseModel(L.LightningModule):
 
             self._image_logging_epochs += 1
         
-        # Clear stored outputs for next epoch
         self.validation_step_outputs.clear()
     
-    def _log_predictions_as_images(self, x, y_true, y_pred, prefix='val', sample_idx=0):
+    def _log_predictions_as_images(self, x, y_true, y_pred, prefix='val', sample_idx=0, timesteps_to_show=None):
         """
         Log predictions as images to TensorBoard or WandB.
         Each prediction consists of multiple timestep images (the full sequence length).
@@ -200,7 +221,7 @@ class BaseModel(L.LightningModule):
             sample_idx: Index of the sample being logged (for multiple predictions per epoch)
         """
         try:
-            batch_idx = 0  # Always 0 since we store individual samples
+            batch_idx = 0  
             seq_len = y_true.shape[1]
             
             sample_true = y_true[batch_idx]
@@ -217,45 +238,168 @@ class BaseModel(L.LightningModule):
                 y_true_np = sample_true.numpy()
                 y_pred_np = sample_pred.numpy()
             elif sample_true.ndim == 4:
-                # Multi-channel input; visualize the first channel by default.
                 y_true_np = sample_true[:, 0].numpy()
                 y_pred_np = sample_pred[:, 0].numpy()
             else:
                 raise ValueError(
                     f'Unsupported tensor rank {sample_true.ndim} for image logging; expected 3 or 4 dimensions.'
                 )
+            if timesteps_to_show is None:
+                timesteps_to_show = list(range(seq_len))
+            else:
+                if isinstance(timesteps_to_show, int):
+                    timesteps_to_show = [int(timesteps_to_show)]
+                elif isinstance(timesteps_to_show, str):
+                    tts_str = timesteps_to_show.lower()
+                    if tts_str in ('all', 'none'):
+                        timesteps_to_show = list(range(seq_len))
+                    elif tts_str == 'last':
+                        timesteps_to_show = [seq_len - 1]
+                    elif tts_str == 'random':
+                        low = max(1, seq_len // 2)
+                        high = seq_len
+                        if high <= low:
+                            t = seq_len - 1
+                        else:
+                            t = int(np.random.randint(low=low, high=high))
+                        timesteps_to_show = [t]
+                    elif ',' in timesteps_to_show:
+                        timesteps_to_show = [int(s) for s in timesteps_to_show.split(',')]
+                    else:
+                        try:
+                            timesteps_to_show = [int(timesteps_to_show)]
+                        except Exception:
+                            timesteps_to_show = list(range(seq_len))
+                else:
+                    timesteps_to_show = [int(t) for t in timesteps_to_show]
+            clamped_timesteps = []
+            invalid = []
+            for t in timesteps_to_show:
+                if t < 0 or t >= seq_len:
+                    invalid.append(t)
+                    clamped_timesteps.append(max(0, min(seq_len - 1, int(t))))
+                else:
+                    clamped_timesteps.append(int(t))
+
+            if invalid:
+                msg = (
+                    f'Requested timesteps {invalid} out of range [0, {seq_len - 1}]; '
+                    f'clamped to {clamped_timesteps}.'
+                )
+                try:
+                    if isinstance(self.logger, WandbLogger) and hasattr(self.logger, 'experiment'):
+                        print(msg)
+                        try:
+                            self.logger.experiment.log({f"{prefix}_timestep_clamp": msg}, step=self.current_epoch)
+                        except Exception:
+                            pass
+                    else:
+                        print(msg)
+                except Exception:
+                    print(msg)
+
+            timesteps_to_show = clamped_timesteps
+            num_timesteps = len(timesteps_to_show)
+
+            if seq_len == 1:
+                fig, axes = plt.subplots(3, 1, figsize=(6, 12))
+                if axes.ndim == 1:
+                    axes = axes.reshape(3, 1)
+            else:
+                cbar_width = 0.05
+                spacer_width = 0.08
+                fig_width = max(4 * num_timesteps, 6)
+                fig = plt.figure(figsize=(fig_width + 2.5, 12))
+                gs = fig.add_gridspec(
+                    nrows=3,
+                    ncols=num_timesteps + 3,
+                    width_ratios=[1] * num_timesteps + [cbar_width, spacer_width, cbar_width],
+                    wspace=0.05,
+                    hspace=0.12,
+                )
+                axes = np.empty((3, num_timesteps), dtype=object)
+                for r in range(3):
+                    for c in range(num_timesteps):
+                        axes[r, c] = fig.add_subplot(gs[r, c])
+                cbar_ax_val = fig.add_subplot(gs[:, num_timesteps])
+                cbar_ax_err = fig.add_subplot(gs[:, num_timesteps + 2])
             
-            timesteps_to_show = list(range(seq_len))
-            num_timesteps = seq_len
-            
-            fig, axes = plt.subplots(3, num_timesteps, figsize=(4 * num_timesteps, 12))
-            
-            if num_timesteps == 1:
-                axes = axes.reshape(-1, 1)
-            
+            error_stack = np.abs(y_true_np[timesteps_to_show] - y_pred_np[timesteps_to_show])
+            global_vmin = 0.0
+            global_vmax = float(error_stack.max()) if error_stack.size > 0 else 1.0
+
             for col_idx, t in enumerate(timesteps_to_show):
                 true_frame = y_true_np[t]
                 pred_frame = y_pred_np[t]
                 error_frame = np.abs(true_frame - pred_frame)
-                
+
                 im0 = axes[0, col_idx].imshow(true_frame, cmap='viridis', aspect='auto')
                 axes[0, col_idx].set_title(f'Ground Truth (t={t})')
                 axes[0, col_idx].axis('off')
-                plt.colorbar(im0, ax=axes[0, col_idx], fraction=0.046)
-                
+
                 im1 = axes[1, col_idx].imshow(pred_frame, cmap='viridis', aspect='auto')
                 axes[1, col_idx].set_title(f'Prediction (t={t})')
                 axes[1, col_idx].axis('off')
-                plt.colorbar(im1, ax=axes[1, col_idx], fraction=0.046)
-                
-                im2 = axes[2, col_idx].imshow(error_frame, cmap='hot', aspect='auto')
+
+                im2 = axes[2, col_idx].imshow(error_frame, cmap='hot', aspect='auto', vmin=global_vmin, vmax=global_vmax)
                 axes[2, col_idx].set_title(f'Abs Error (t={t})')
                 axes[2, col_idx].axis('off')
-                plt.colorbar(im2, ax=axes[2, col_idx], fraction=0.046)
+
+            try:
+                val_stack = np.concatenate([y_true_np[timesteps_to_show], y_pred_np[timesteps_to_show]], axis=0)
+                val_vmin = float(val_stack.min()) if val_stack.size > 0 else float(np.min(y_true_np))
+                val_vmax = float(val_stack.max()) if val_stack.size > 0 else float(np.max(y_true_np))
+                mappable_val = plt.cm.ScalarMappable(cmap='viridis')
+                mappable_val.set_clim(val_vmin, val_vmax)
+                if seq_len == 1:
+                    cbar_gt = plt.colorbar(im0, ax=axes[0, 0], fraction=0.046)
+                    cbar_pred = plt.colorbar(im1, ax=axes[1, 0], fraction=0.046)
+                    try:
+                        cbar_gt.ax.tick_params(labelsize=8)
+                        cbar_pred.ax.tick_params(labelsize=8)
+                    except Exception:
+                        pass
+                else:
+                    cbar_val = fig.colorbar(mappable_val, cax=cbar_ax_val, fraction=0.02, pad=0.02)
+                    cbar_val.ax.set_title('Value')
+                    cbar_val.ax.tick_params(labelsize=8)
+                    try:
+                        cbar_val.ax.title.set_fontsize(10)
+                    except Exception:
+                        pass
+
+                mappable_err = plt.cm.ScalarMappable(cmap='hot')
+                mappable_err.set_clim(global_vmin, global_vmax)
+                if seq_len == 1:
+                    cbar_err = plt.colorbar(im2, ax=axes[2, 0], fraction=0.046)
+                    try:
+                        cbar_err.ax.set_title('Abs Error')
+                        cbar_err.ax.tick_params(labelsize=8)
+                        cbar_err.ax.title.set_fontsize(10)
+                    except Exception:
+                        pass
+                else:
+                    cbar_err = fig.colorbar(mappable_err, cax=cbar_ax_err, fraction=0.02, pad=0.02)
+                    cbar_err.ax.set_title('Abs Error')
+                    cbar_err.ax.tick_params(labelsize=8)
+                    try:
+                        cbar_err.ax.title.set_fontsize(10)
+                    except Exception:
+                        pass
+            except Exception:
+                for col_idx in range(num_timesteps):
+                    true_frame = y_true_np[col_idx]
+                    pred_frame = y_pred_np[col_idx]
+                    error_frame = np.abs(true_frame - pred_frame)
+                    im0 = axes[0, col_idx].imshow(true_frame, cmap='viridis', aspect='auto')
+                    plt.colorbar(im0, ax=axes[0, col_idx], fraction=0.046)
+                    im1 = axes[1, col_idx].imshow(pred_frame, cmap='viridis', aspect='auto')
+                    plt.colorbar(im1, ax=axes[1, col_idx], fraction=0.046)
+                    im2 = axes[2, col_idx].imshow(error_frame, cmap='hot', aspect='auto')
+                    plt.colorbar(im2, ax=axes[2, col_idx], fraction=0.046)
             
             plt.tight_layout()
             
-            # Use sample_idx in key name for multiple predictions
             key_suffix = f'_sample_{sample_idx}' if self.num_predictions_to_log > 1 else ''
             
             if isinstance(self.logger, TensorBoardLogger) and hasattr(self.logger, 'experiment'):
