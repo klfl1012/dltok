@@ -32,15 +32,12 @@ def _str2bool(value: str | bool) -> bool:
 
 def parse_noise_std(value):
     """Parses noise_std input to float or tuple of two floats."""
-    # Split input by commas to handle tuple-like input
     if ',' in value:
-        # Attempt to convert to a tuple of floats
         try:
             return tuple(float(x) for x in value.split(','))
         except ValueError:
             raise argparse.ArgumentTypeError(f"Invalid input format: {value}. Expected 'float,float'.")
     else:
-        # Attempt to convert to a float
         try:
             return float(value)
         except ValueError:
@@ -220,7 +217,6 @@ def _build_args() -> argparse.Namespace:
         '--checkpoint_dir',
         type=str,
         default=str(os.getenv('CHECKPOINT_ROOT', 'checkpoints')),
-        # default=str(Path('/dtu/blackhole/1b/191611/DL/ckpts/')),
         help='Directory to save model checkpoints'
     )
     parser.add_argument(
@@ -317,12 +313,10 @@ def _train(args):
     )
 
     sample_sequence, _ = train_loader.dataset[0]
-    # sample_sequence shape: [T, C, X, Y] or [T, X, Y]
     num_channels = sample_sequence.shape[1] if sample_sequence.ndim == 4 else 1
 
     print('Building model...')
     overrides = {}
-    # ensure model is created with matching input/output channels
     overrides['in_channels'] = num_channels
     overrides['out_channels'] = num_channels
     data_config = {
@@ -506,6 +500,7 @@ def _inference(args):
     checkpoint_data_config = checkpoint_hparams.get('data_config')
 
     if checkpoint_data_config and not args.ignore_checkpoint_data_config:
+        # Override CLI args with stored training configuration to avoid mismatches.
         for key in ('seq_len', 'spatial_resolution', 'batch_size', 'seed'):
             value = checkpoint_data_config.get(key)
             if value is not None:

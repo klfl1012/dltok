@@ -6,10 +6,10 @@ from typing import Tuple, List, Optional, Union
 import numpy as np
 from boutdata import collect
 import torch.nn.functional as F
+import os
 
 DEFAULT_DATA_ROOTS = {
-    'data': Path('/dtu/blackhole/16/223702/data')
-    # 'data': Path('/dtu/blackhole/1b/191611/data')
+    'data': Path(os.getenv('DATA_ROOT', '/dtu/blackhole/16/223702/TCV-DATA'))
 }
 
 @dataclass(frozen=True)
@@ -53,16 +53,13 @@ class PlasmaDataset(Dataset):
         x = self.data[idx]   # [T, C, X, Y] or [T, X, Y]
         y = self.targets[idx]
 
-        # Ensure we always have a channel dimension: [T, C, X, Y]
         if x.ndim == 3:
             x = x.unsqueeze(1)  # [T, 1, X, Y]
             y = y.unsqueeze(1)
 
-        # Downsample if spatial_resolution is specified
         if self.spatial_resolution is not None:
             T, C, X, Y = x.shape
             if X != self.spatial_resolution or Y != self.spatial_resolution:
-                # [T, C, X, Y] -> [T*C, 1, X, Y] for interpolation
                 x = x.view(T * C, 1, X, Y)
                 y = y.view(T * C, 1, X, Y)
 
@@ -79,7 +76,6 @@ class PlasmaDataset(Dataset):
                     align_corners=False,
                 )
 
-                # Back to [T, C, X, Y]
                 x = x.view(T, C, self.spatial_resolution, self.spatial_resolution)
                 y = y.view(T, C, self.spatial_resolution, self.spatial_resolution)
 
@@ -221,7 +217,8 @@ def build_dataloader(
         "Data loaded: Original size, target resolution:"
         f" {spatial_resolution if spatial_resolution else 'original'}"
         f", normalization={'on' if normalize else 'off'}"
-        f", dataset lengths: train={len(train_loader)}, val={len(val_loader)}, test={len(test_loader)}"
+        f", dataloaders with len (train/val/test): "
+        f"({len(train_loader)}, {len(val_loader)}, {len(test_loader)})"
     )
     
     return train_loader, val_loader, test_loader
