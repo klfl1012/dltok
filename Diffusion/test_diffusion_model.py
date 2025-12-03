@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 
 
 checkpoint_path = "ckpts/diffusion_res256_seq100_20251127_223746-best.ckpt" # 1000 training steps
-# checkpoint_path = "ckpts/diffusion_res256_seq100_20251127_233055-best.ckpt" # 2000 training steps
 
 spatial_resolution = 256
 
@@ -22,7 +21,7 @@ train_loader, val_loader, test_loader = dataloader.build_dataloader(
     seed=12,
     spatial_resolution=spatial_resolution,
     normalize=True,
-    dataset_name='Test',
+    dataset_name='Test', # Doesnt matter as long as its not PlasmaDataset
 )
 
 data_min = float('inf')
@@ -36,9 +35,9 @@ print(f"Final data range: [{data_min:.6f}, {data_max:.6f}]")
 model = DiffusionModel.load_from_checkpoint(checkpoint_path)
 
 
-input_batch = next(iter(test_loader))  # Get a single batch
-x = input_batch[0].to(model.device)  # Input tensor
-y = input_batch[1].to(model.device)  # Target tensor
+input_batch = next(iter(test_loader))   # Get a single batch
+x = input_batch[0].to(model.device)     # Input tensor
+y = input_batch[1].to(model.device)     # Target tensor
 
 y_hat = model.infer(x, steps=2000)
 
@@ -56,6 +55,6 @@ print("min and max of y:", y_cpu.min().item(), y_cpu.max().item())
 print("min and max of y_hat:", y_hat.min().item(), y_hat.max().item())
 
 # Export all 3 tensors 
-torch.save(x_cpu, "x_tensor.pt")
-torch.save(y_cpu, "y_tensor.pt")
-torch.save(y_hat_cpu, "y_hat_tensor.pt")
+torch.save(x_cpu, "x_tensor_test.pt")
+torch.save(y_cpu, "y_tensor_test.pt")
+torch.save(y_hat_cpu, "y_hat_tensor_test.pt")

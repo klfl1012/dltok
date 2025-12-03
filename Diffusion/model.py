@@ -495,7 +495,7 @@ class TFNOModel(BaseModel):
 class DiffusionModel(BaseModel):
     def __init__(
         self,
-
+        # A lot of configurations have actually been left unused here. I'm simply putting there to give flexibility for experiments, just in case
         # UNet configurations
         dim,                                # Number of filters in the first layer. Used to initialize init_dim if init_dim is None
         init_dim = None,                    # The number of output channels for the initial convolution layer
@@ -614,13 +614,11 @@ class DiffusionModel(BaseModel):
         if x.ndim == 3:
             x = x.unsqueeze(0)  # [B, C, H, W] or [B, C, L]
 
-        # Normalize to roughly [-1, 1] or whatever your training normalization was
         if not self.auto_normalize:
             x = (x - self.data_min) / (self.data_max - self.data_min)
         else:
-            x = diff.normalize(x)  # assumes this does (x - data_min)/(data_max - data_min) * 2 - 1 or similar
+            x = diff.normalize(x)  
 
-        # === DDIM sampling (unchanged until the end) ===
         seq = torch.linspace(diff.num_timesteps-1, 0, steps+1, dtype=torch.long, device=device)
         seq_next = torch.cat([seq[1:], torch.tensor([-1], device=device)])
 
@@ -654,8 +652,8 @@ class DiffusionModel(BaseModel):
                 x_t = pred_x0  # final deterministic step
 
         if not self.auto_normalize:
-            # Reverse the [0,1] → original
-            x_out = (x_t + 1.0) / 2.0                                  # → [0, 1]
+            # Reverse normalization
+            x_out = (x_t + 1.0) / 2.0                               
             x_out = x_out * (self.data_max - self.data_min + 1e-8) + self.data_min
         else:
             x_out = diff.unnormalize(x_t)
@@ -694,18 +692,7 @@ class DiffusionModel(BaseModel):
             on_epoch=True,
             logger=True
         )
-        
-        # Store outputs from first batch for end-of-epoch image logging
-        # if self.enable_val_image_logging and batch_idx == 0:
-        #     # Store up to num_predictions_to_log samples
-        #     num_samples = min(self.num_predictions_to_log, x.shape[0])
-        #     for i in range(num_samples):
-        #         self.validation_step_outputs.append({
-        #             'x': x[i:i+1].detach().cpu(),
-        #             'y_true': y[i:i+1].detach().cpu(),
-        #             'y_pred': y_hat[i:i+1].detach().cpu()
-        #         })
-        
+
         return val_loss
     
     def test_step(self, batch, batch_idx):
@@ -731,20 +718,7 @@ class DiffusionModel(BaseModel):
         noisy = noisy.to(self.device)
         clean = clean.to(self.device)  # optional ground truth
 
-        # This uses your infer() → DDIM denoising from real noisy image
         denoised = self.infer(noisy, steps=2)  # Small number of steps for faster inference
-
-        # Optional: log before/after images during prediction
-        # if self.enable_inference_image_logging and batch_idx == 0 and self.logger is not None:
-        #     num_samples = min(self.num_predictions_to_log, noisy.shape[0])
-        #     for i in range(num_samples):
-        #         self._log_predictions_as_images(
-        #             x=noisy[i:i+1].cpu(),
-        #             y_true=clean[i:i+1].cpu(),
-        #             y_pred=denoised[i:i+1].cpu(),
-        #             prefix='inference',
-        #             sample_idx=i,
-        #         )
 
         # Return denoised image + ground truth (for offline metrics if needed)
         return denoised, clean

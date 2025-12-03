@@ -9,7 +9,8 @@ import torch.nn.functional as F
 
 DEFAULT_DATA_ROOTS = {
     # 'data': Path('/dtu/blackhole/16/223702/data')
-    'data': Path('/dtu/blackhole/1b/191611/data')
+    # 'data': Path('/dtu/blackhole/1b/191611/data')
+    'data': Path("/dtu-compute/proj-jehi/TCV-DATA")
 }
 
 @dataclass(frozen=True)
