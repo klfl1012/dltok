@@ -3,7 +3,7 @@
 ### –- specify queue --
 #BSUB -q gpuv100
 ### -- set the job Name --
-#BSUB -J dl_job_32gb_epochs:100_spatial_resolution_256_timesteps2000_3000_4000 
+#BSUB -J dl_job_32gb_epochs:200 
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 4
 ### -- Select the resources: 1 gpu in exclusive process mode --
@@ -28,10 +28,11 @@
 # -- end of LSF options --
 
 source /dtu/blackhole/1b/191611/DL/DL/bin/activate
-cd /dtu/blackhole/1b/191611/Data
+cd /dtu/blackhole/1b/191611/DL
 
 # python main.py --mode train     --max_epochs 5     --batch_size 8     --seq_len 4  --spatial_resolution 128     --hidden_channels 16     --n_modes "4,4,4"  --patience 3     --num_predictions_to_log 1 --use_wandb
-# python main.py --mode train  --model "diffusion"  --dataset_name "DiffusionDataset" --max_epochs 100     --batch_size 4 --spatial_resolution 512  --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8" --diffusion_flash_attn --diffusion_auto_normalize --use_wandb
-python main.py --mode train  --diffusion_timesteps 2000 --diffusion_sampling_timesteps 2000 --model "diffusion"  --dataset_name "DiffusionDataset" --max_epochs 100     --batch_size 4 --spatial_resolution 256  --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8" --diffusion_flash_attn --use_wandb
-python main.py --mode train  --diffusion_timesteps 3000 --diffusion_sampling_timesteps 3000 --model "diffusion"  --dataset_name "DiffusionDataset" --max_epochs 100     --batch_size 4 --spatial_resolution 256  --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8" --diffusion_flash_attn --use_wandb
-python main.py --mode train  --diffusion_timesteps 4000 --diffusion_sampling_timesteps 4000 --model "diffusion"  --dataset_name "DiffusionDataset" --max_epochs 100     --batch_size 4 --spatial_resolution 256  --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8" --diffusion_flash_attn --use_wandb
+# python main.py --mode train  --model "diffusion"  --dataset_name "DiffusionDataset" --max_epochs 100     --batch_size 4 --spatial_resolution 512  --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8" --diffusion_flash_attn --use_wandb
+
+python main.py --mode train --model "diffusion" --max_epochs 100 --diffusion_timesteps 1000 --diffusion_sampling_timesteps 1000  --dataset_name "DiffusionDataset" --batch_size 4 --spatial_resolution 256 --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8" --diffusion_flash_attn --use_wandb
+python main.py --mode train --model "diffusion" --max_epochs 100 --diffusion_timesteps 1000 --diffusion_sampling_timesteps 1000  --dataset_name "DiffusionDataset" --batch_size 4 --spatial_resolution 256 --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8,16" --diffusion_flash_attn --use_wandb
+python main.py --mode train --model "diffusion" --max_epochs 200 --diffusion_timesteps 1000 --diffusion_sampling_timesteps 1000  --dataset_name "DiffusionDataset" --batch_size 4 --spatial_resolution 256 --num_predictions_to_log 1 --diffusion_dim 64 --diffusion_dim_mults "1,2,4,8,16" --diffusion_flash_attn --use_wandb
